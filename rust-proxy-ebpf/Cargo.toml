@@ -1,0 +1,20 @@
+[package]
+name = "rust-proxy-ebpf"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# aya-ebpf: 内核态编程的核心
+aya-ebpf = "0.1"
+# 引用共享模块，确保内核态使用一致的数据结构
+rust-proxy-common = { path = "../rust-proxy-common" }
+
+[[bin]]
+name = "rust-proxy"
+path = "src/main.rs"
+
+[profile.release]
+# 极致性能优化设置
+lto = true
+panic = "abort" # 内核态不支持堆栈展开
+opt-level = 3   # 开启最高级别优化以压榨吞吐量

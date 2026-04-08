@@ -1,0 +1,15 @@
+{
+  "listen_addr": "0.0.0.0:443",
+  "routes": {
+    "updates.cdn-apple.com": {
+      "addr": "127.0.0.1:10443",
+      "jump_start": 4, 
+      "idle_timeout": 300 
+    },
+    "example.com": {
+      "addr": "127.0.0.1:8443",
+      "jump_start": 2,
+      "idle_timeout": 600
+    }
+  }
+}

@@ -1,0 +1,95 @@
+# -----------------------------------------------------------------------------
+# 🌟 Rust-Proxy 高性能“暴力发布”流水线 (GitHub Actions)
+#    【借鉴自 gnet-proxy 的优秀实践】
+#
+#    【核心黑科技】：
+#         1. 全自动 eBPF 编译：自动配置 LLVM 环境，生成内核态加速字节码。
+#         2. 性能分层编译 (Amd64 v3)：针对 AVX2 指令集进行定向优化，榨干 CPU 每一丝算力。
+#         3. 发布自动覆盖：永远只留下一棵“最新成果”的独苗，保持 Release 页面纯净。
+#
+#    【目标平台】：Linux Debian/Ubuntu (amd64)
+# -----------------------------------------------------------------------------
+
+name: 🚀 Build & Global Release (Rust-Proxy Linux amd64)
+
+on:
+  push:
+    branches:
+      - main  # 🎯 当主分支有更新时，自动启动编译流程
+    paths-ignore:
+      - '**.md' # 📝 文档修改不触发昂贵的编译任务
+      - 'docs/**'
+  workflow_dispatch: # 🖱️ 支持手动点击运行
+
+jobs:
+  release:
+    name: 🏗️ Rust-Aya Compile & Release
+    runs-on: ubuntu-latest # 🖥️ 在标准的 Linux 云环境中构建
+    permissions:
+      contents: write # 🛡️ 必须具备写权限，才能清理旧版并发布新版
+
+    steps:
+      - name: 🚚 Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取所有历史记录，以便进行旧版本清理
+
+      - name: 🦀 Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly # 💎 eBPF 编译通常需要 Nightly 链
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: 📦 Cache Rust Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: 🔧 Install BPF Dependencies
+        # 安装编译 eBPF 必须的工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm libelf-dev
+          # 如果不存在缓存，则安装 bpf-linker
+          command -v bpf-linker >/dev/null 2>&1 || cargo install bpf-linker
+
+      - name: 🍳 Compile Linux amd64 Standard (Compatibility)
+        # 兼容型版本，适用于所有 amd64 机器
+        run: |
+          # 注意：这里我们先手动编译 ebpf 子项目（如果有特定的构建逻辑）
+          # 假设我们需要先编译内核态
+          cd rust-proxy-ebpf && cargo build --release && cd ..
+          cargo build --release
+          mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
+
+      - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
+        # 🔥 开启 AVX2 优化，追求极致的报文处理速度
+        run: |
+          RUSTFLAGS="-C target-feature=+avx2" cargo build --release
+          mv target/release/rust-proxy ./rust-proxy-linux-amd64-avx2
+
+      - name: 🧹 Pure Cleanup - Destroy Old Releases
+        # 💣 模仿 gnet-proxy，清空历史残骸，只留独苗
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🧨 正在清理旧的历史发布..."
+          gh release list --limit 100 --json tagName -q ".[].tagName" | xargs -r -I {} gh release delete {} --cleanup-tag -y || true
+
+      - name: 🚀 Launch New Release
+        # 💎 正式全网发布
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v$(date +'%Y.%m.%d-%H%M')"
+          gh release create "$TAG_NAME" \
+            --title "Latest High-Performance Build ($TAG_NAME)" \
+            --notes "✨ 基于 Rust + io_uring + eBPF 的高性能 SNI 代理。包含标准兼容版与 AVX2 提速版。" \
+            ./rust-proxy-linux-amd64-std \
+            ./rust-proxy-linux-amd64-avx2
+          echo "🎉 全球发布圆满成功！"

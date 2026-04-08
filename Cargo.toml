@@ -1,0 +1,46 @@
+[package]
+name = "rust-proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# --- 核心异步运行时 (Core Runtime) ---
+# monoio: 这是极致性能的关键。它基于 io_uring 构建，采用了 Thread-per-core 架构，
+# 避免了传统模型中的 CPU 上下文切换和跨线程同步开销。
+# 我们选择它是因为我们需要“暴力提速”。
+monoio = { version = "0.2.4", features = ["utils", "macros"] }
+
+# --- 日志与观测 (Logging & Observability) ---
+# tracing: 现代 Rust 异步日志的首选，支持结构化日志。
+# 它能让我们追踪每一个连接的生命周期，非常适合调试高性能网络应用。
+tracing = "0.1"
+# tracing-subscriber: 用于将追踪数据输出到标准输出 (stdout)，支持彩色显示和过滤。
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- 协议解析与安全性 (Protocol & Security) ---
+# tls-parser: 工业级、零拷贝的 TLS 解析库。
+# 相比手动解析，它能更安全地处理各种 TLS 扩展，规避缓冲区攻击。
+tls-parser = "0.12"
+
+# --- 底层控制与调优 (Networking Base) ---
+# socket2: Rust 社区最流行的底层 Socket 控制库，用于物理层调优。
+socket2 = { version = "0.5", features = ["all"] }
+
+# --- 序列化与配置 (Serialization & Config) ---
+# serde: Rust 社区的事实标准，用于将配置文件、协议报文转换为 Rust 结构体。
+serde = { version = "1.0", features = ["derive"] }
+# serde_json: 处理 JSON 配置，方便与前端或外部 API 交互。
+serde_json = "1.0"
+# json_comments: 允许配置文件包含注释（如 config.jsonc），提升用户体验。
+json_comments = "0.2"
+
+# --- eBPF 加速框架 (Aya-rs) ---
+# aya: 纯 Rust 实现的 eBPF 加密/加载库，它是我们实现“零上下文切换转发”的钥匙。
+aya = { version = "0.13", features = ["async-tokio"] }
+# aya-log: 允许我们在用户态实时看到 eBPF 在内核中打印的 debug 信息。
+aya-log = "0.2"
+
+# --- 错误处理与工具 ---
+anyhow = "1.0"
+bytes = "1.0"
+futures = "0.3"

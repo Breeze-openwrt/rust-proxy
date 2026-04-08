@@ -1,0 +1,8 @@
+[package]
+name = "rust-proxy-common"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# aya-ebpf: 提供内核态所需的基础结构
+aya-ebpf = "0.1" 
