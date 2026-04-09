@@ -59,6 +59,9 @@ futures = "0.3"
 
 # --- 全局性能优化配置 (Workspace Profile) ---
 # 在工作区模式下，所有的优化参数必须在根目录统一配置。
+[profile.dev]
+panic = "abort"     # eBPF (no_std) 开发模式下必须使用 abort
+
 [profile.release]
 lto = true          # 开启全量链接时优化，消除跨模块调用开销。
 panic = "abort"     # 发生异常时直接退出，不进行复杂的堆栈展开，减小体积。
