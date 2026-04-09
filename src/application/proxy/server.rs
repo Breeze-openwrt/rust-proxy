@@ -74,15 +74,16 @@ impl ProxyServer {
                     info!("🚀 eBPF 字节码加载成功，准备挂载...");
                     
                     // --- 步骤 1: 挂载 TC 过滤器 (针对域名侦听和防御) ---
-                    let _ = tc::qdisc_add_clsact("eth0");
+                    let iface = &shared_config.network_interface;
+                    let _ = tc::qdisc_add_clsact(iface);
                     if let Some(prog) = bpf.program_mut("filter_sni") {
                         if let Ok(tc_prog) = prog.try_into() {
                             let tc_prog: &mut SchedClassifier = tc_prog;
                             if let Ok(_) = tc_prog.load() {
-                                if let Err(e) = tc_prog.attach("eth0", TcAttachType::Ingress) {
-                                    warn!("❌ TC 挂载失败 (eth0): {:?}", e);
+                                if let Err(e) = tc_prog.attach(iface, TcAttachType::Ingress) {
+                                    warn!("❌ TC 挂载失败 ({}): {:?}", iface, e);
                                 } else {
-                                    info!("✅ TC 域名过滤器已挂载到 eth0 (Ingress)");
+                                    info!("✅ TC 域名过滤器已挂载到 {} (Ingress)", iface);
                                 }
                             }
                         }

@@ -17,6 +17,13 @@ pub struct Config {
     pub log: Option<LogConfig>,
     /// 路由表：域名 -> 目标配置
     pub routes: HashMap<String, RouteConfig>,
+    /// 绑定的物理网卡名称，默认 "eth0"
+    #[serde(default = "default_interface")]
+    pub network_interface: String,
+}
+
+fn default_interface() -> String {
+    "eth0".to_string()
 }
 
 /// 日志配置

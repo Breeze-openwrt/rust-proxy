@@ -1,5 +1,6 @@
 {
   "listen_addr": "0.0.0.0:443",
+  "network_interface": "eth0",
   "log": {
     "level": "info",
     "output": "stdout"
