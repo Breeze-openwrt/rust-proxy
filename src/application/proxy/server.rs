@@ -19,8 +19,7 @@ use aya::{Ebpf, programs::SkMsg};
 use aya::maps::{SockMap, HashMap};
 use tracing::{info, error, debug, warn};
 use futures::future::{select, Either};
-#[cfg(target_os = "linux")]
-use std::os::unix::io::AsRawFd;
+
 
 /// 代理服务器主体
 #[derive(Clone)]

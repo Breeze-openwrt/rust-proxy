@@ -66,16 +66,16 @@ jobs:
           # 同时指定正确的重命名后的二进制目标名称
           cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none -Z build-std=core && cd ..
           
-          # 🔥 关键修正 2：利用 Workspace 模式显式指定主包名与目标架构，彻底杜绝歧义
-          cargo build --package rust-proxy --release --target x86_64-unknown-linux-gnu
-          mv target/x86_64-unknown-linux-gnu/release/rust-proxy ./rust-proxy-linux-amd64-std
+          # 🔥 关键修正 2：针对 Native 构建移除冗余 --target，Cargo 将默认输出到 target/release
+          cargo build --package rust-proxy --release
+          mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
         # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化
         run: |
-          # 🔥 关键修正 3：在工作区模式下强制锚定主项目 bin，并指定目标架构
-          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --release --target x86_64-unknown-linux-gnu
-          mv target/x86_64-unknown-linux-gnu/release/rust-proxy ./rust-proxy-linux-amd64-v3
+          # 🔥 关键修正 3：同上，移除冗余 --target 确保路径一致性
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --release
+          mv target/release/rust-proxy ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases
         # 💣 模仿 gnet-proxy，清空历史残骸，只留独苗
