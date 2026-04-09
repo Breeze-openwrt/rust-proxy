@@ -27,13 +27,16 @@ static REDIRECT_MAP: SockMap = SockMap::with_max_entries(1024, 0);
 /// 每当有数据包 (Message) 到达受监控的 Socket 时，内核就会调用这个函数。
 #[sk_msg]
 pub fn fast_forward(ctx: SkMsgContext) -> u32 {
-    // --- 暴力重定向：精准纠偏 ---
-    // 根据编译器高度智能的提示，处理 sk_msg 程序的重定向应改用专属的 redirect_msg 方法。
-    // 第一个 0 代表 flag，第二个 0 代表额外的控制位。
-    match REDIRECT_MAP.redirect_msg(&ctx, 0, 0) {
-        Ok(_) => 1, // 成功重定向：这里的 1 对应内核中的 SK_PASS。
-        Err(_) => 1, // 兜底策略：失败也让数据流向用户态，保证代理逻辑稳健。
-    }
+    // --- 暴力重定向：类型对齐 ---
+    // 根据编译器高度智能的反馈，redirect_msg 返回的是原始的 i64 状态码，
+    // 而非 Rust 用户态常见的 Result 枚举。
+    // 我们直接执行该指令，并将决策权交给内核。
+    let _ = REDIRECT_MAP.redirect_msg(&ctx, 0, 0);
+
+    // 源码级解释：
+    // 返回 1 代表 SK_PASS，表示该消息处理完成且被允许通过。
+    // 即使重定向失败，我们也交由用户态做兜底转发，确保服务 100% 可用。
+    1
 }
 
 #[panic_handler]
