@@ -173,8 +173,8 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     unsafe {
-        libc::signal(libc::SIGINT, handle_sig as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_sig as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handle_sig as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_sig as *const () as libc::sighandler_t);
     }
 
     // 异步任务：监视套接字读取端
