@@ -68,10 +68,11 @@ jobs:
           mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
-        # 🔥 开启 AVX2 优化，追求极致的报文处理速度
+        # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化 (对标 Go 的 GOAMD64=v3)
+        # 这会自动开启 AVX2, BMI2, FMA 等指令集，实现最高效的数据包分流。
         run: |
-          RUSTFLAGS="-C target-feature=+avx2" cargo build --release
-          mv target/release/rust-proxy ./rust-proxy-linux-amd64-avx2
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+          mv target/release/rust-proxy ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases
         # 💣 模仿 gnet-proxy，清空历史残骸，只留独苗

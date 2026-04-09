@@ -3,7 +3,7 @@
 //! 本子模块定义了用户态 (User Space) 与内核态 (Kernel Space) 之间沟通的“暗号”。
 //! 所有的 BPF Map 结构体定义都应存放在此处，以保证内存对齐一致。
 
-use aya_ebpf::macros::map; // 引入宏（注意：在普通库中我们仅作为定义参考）。
+// 在 common 模块中，我们仅定义结构体，不直接操作 BPF Map。
 
 /// 关键：Socket 重定向映射表
 /// 
