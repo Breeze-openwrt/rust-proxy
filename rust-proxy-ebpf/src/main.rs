@@ -96,18 +96,18 @@ pub fn filter_sni(ctx: TcContext) -> i32 {
 
 #[inline(always)]
 fn try_filter_sni(ctx: TcContext) -> Result<i32, ()> {
-    let eth_hdr = unsafe { ctx.ptr_at::<EthHdr>(0)? };
+    let eth_hdr = ctx.ptr_at::<EthHdr>(0)?;
     if unsafe { (*eth_hdr).ether_type } != 0x0008 { // IPv4
         return Ok(0); // TC_ACT_OK
     }
 
-    let ip_hdr = unsafe { ctx.ptr_at::<IpHdr>(EthHdr::LEN)? };
+    let ip_hdr = ctx.ptr_at::<IpHdr>(EthHdr::LEN)?;
     if unsafe { (*ip_hdr).protocol } != 0x06 { // TCP
         return Ok(0);
     }
 
     let ip_len = EthHdr::LEN + IpHdr::LEN;
-    let tcp_hdr = unsafe { ctx.ptr_at::<TcpHdr>(ip_len)? };
+    let tcp_hdr = ctx.ptr_at::<TcpHdr>(ip_len)?;
 
     // 1. 构建会话 Key
     let session = unsafe {
@@ -135,7 +135,7 @@ fn try_filter_sni(ctx: TcContext) -> Result<i32, ()> {
         if unsafe { ALLOWED_DOMAINS.get(&sni).is_some() } {
             // 合法：存入缓存并放行
             let now = unsafe { bpf_ktime_get_ns() };
-            let _ = unsafe { SESSION_CACHE.insert(&session, &now, 0) };
+            let _ = SESSION_CACHE.insert(&session, &now, 0);
             return Ok(0);
         } else {
             // 非法：直接丢弃！
@@ -150,12 +150,12 @@ fn try_filter_sni(ctx: TcContext) -> Result<i32, ()> {
 #[inline(always)]
 fn parse_sni(ctx: &TcContext, offset: usize) -> Option<DomainKey> {
     // 1. TLS Record Header (5 bytes)
-    let content_type: u8 = unsafe { *ctx.ptr_at(offset).ok()? };
+    let content_type: u8 = unsafe { *ctx.ptr_at::<u8>(offset).ok()? };
     if content_type != 0x16 { return None; } // 必须是 Handshake
 
     // 2. Handshake Header (4 bytes)
     // Offset 5: Handshake Type (0x01 = Client Hello)
-    let handshake_type: u8 = unsafe { *ctx.ptr_at(offset + 5).ok()? };
+    let handshake_type: u8 = unsafe { *ctx.ptr_at::<u8>(offset + 5).ok()? };
     if handshake_type != 0x01 { return None; }
 
     // 3. 跳过固定字段定位到 Extensions
@@ -163,19 +163,19 @@ fn parse_sni(ctx: &TcContext, offset: usize) -> Option<DomainKey> {
     let mut curr = offset + 5 + 38;
 
     // A. 跳过 Session ID (1 字节长度 + 数据)
-    let session_id_len: u8 = unsafe { *ctx.ptr_at(curr).ok()? };
+    let session_id_len: u8 = unsafe { *ctx.ptr_at::<u8>(curr).ok()? };
     curr += 1 + (session_id_len as usize);
 
     // B. 跳过 Cipher Suites (2 字节长度 + 数据)
-    let cipher_suites_len: u16 = unsafe { u16::from_be(*ctx.ptr_at(curr).ok()?) };
+    let cipher_suites_len: u16 = unsafe { u16::from_be(*ctx.ptr_at::<u16>(curr).ok()?) };
     curr += 2 + (cipher_suites_len as usize);
 
     // C. 跳过 Compression Methods (1 字节长度 + 数据)
-    let compression_methods_len: u8 = unsafe { *ctx.ptr_at(curr).ok()? };
+    let compression_methods_len: u8 = unsafe { *ctx.ptr_at::<u8>(curr).ok()? };
     curr += 1 + (compression_methods_len as usize);
 
     // 4. 解析 Extensions (2 字节总长度)
-    let extensions_len: u16 = unsafe { u16::from_be(*ctx.ptr_at(curr).ok()?) };
+    let extensions_len: u16 = unsafe { u16::from_be(*ctx.ptr_at::<u16>(curr).ok()?) };
     curr += 2;
     let extensions_end = curr + (extensions_len as usize);
 
@@ -184,16 +184,16 @@ fn parse_sni(ctx: &TcContext, offset: usize) -> Option<DomainKey> {
     for _ in 0..10 {
         if curr + 4 > extensions_end { break; }
         
-        let ext_type: u16 = unsafe { u16::from_be(*ctx.ptr_at(curr).ok()?) };
-        let ext_len: u16 = unsafe { u16::from_be(*ctx.ptr_at(curr + 2).ok()?) };
+        let ext_type: u16 = unsafe { u16::from_be(*ctx.ptr_at::<u16>(curr).ok()?) };
+        let ext_len: u16 = unsafe { u16::from_be(*ctx.ptr_at::<u16>(curr + 2).ok()?) };
         curr += 4;
 
         if ext_type == 0x0000 { // Server Name Extension
             // SNI 内容解析: List Len(2) + Name Type(1) + Name Len(2) + Name(X)
             if curr + 5 > extensions_end { break; }
-            let name_type: u8 = unsafe { *ctx.ptr_at(curr + 2).ok()? };
+            let name_type: u8 = unsafe { *ctx.ptr_at::<u8>(curr + 2).ok()? };
             if name_type == 0x00 { // host_name
-                let name_len: u16 = unsafe { u16::from_be(*ctx.ptr_at(curr + 3).ok()?) };
+                let name_len: u16 = unsafe { u16::from_be(*ctx.ptr_at::<u16>(curr + 3).ok()?) };
                 let name_start = curr + 5;
                 
                 // 验证长度并拷贝到 DomainKey
@@ -204,7 +204,7 @@ fn parse_sni(ctx: &TcContext, offset: usize) -> Option<DomainKey> {
                 // 在 TC 中我们直接从 ctx 拷贝
                 for i in 0..64 {
                     if i >= copy_len { break; }
-                    if let Ok(val) = unsafe { ctx.ptr_at::<u8>(name_start + i) } {
+                    if let Ok(val) = ctx.ptr_at::<u8>(name_start + i) {
                         key.name[i] = unsafe { *val };
                     }
                 }
