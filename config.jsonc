@@ -5,7 +5,7 @@
     "output": "stdout"
   },
   "routes": {
-    "updates.cdn-apple.com": {
+    "updates.cdn-apple.com, configuration.apple.com": {
       "addr": "127.0.0.1:10443",
       "jump_start": 4, 
       "idle_timeout": 300 
