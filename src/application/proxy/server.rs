@@ -18,8 +18,10 @@ use aya::{Ebpf, programs::SkSkb};
 #[cfg(target_os = "linux")]
 use aya::maps::{SockMap, HashMap};
 #[cfg(target_os = "linux")]
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-use rust_proxy_common::{DomainKey, SessionKey};
+use aya::programs::{SchedClassifier, TcAttachType};
+#[cfg(target_os = "linux")]
+use aya::programs::tc;
+use rust_proxy_common::DomainKey;
 use tracing::{info, error, debug, warn};
 use futures::future::{select, Either};
 
@@ -70,7 +72,8 @@ impl ProxyServer {
                     // --- 步骤 1: 挂载 TC 过滤器 (针对域名侦听和防御) ---
                     let _ = tc::qdisc_add_clsact("eth0"); // 尝试为 eth0 添加 clsact (忽略错误，可能已存在)
                     if let Some(prog) = bpf.program_mut("filter_sni") {
-                        if let Ok(tc_prog) = SchedClassifier::try_from(prog) {
+                        if let Ok(tc_prog) = prog.try_into() {
+                            let tc_prog: &mut SchedClassifier = tc_prog;
                             if let Ok(_) = tc_prog.load() {
                                 if let Err(e) = tc_prog.attach("eth0", TcAttachType::Ingress) {
                                     warn!("❌ TC 挂载失败 (eth0): {:?}", e);
@@ -83,7 +86,7 @@ impl ProxyServer {
 
                     // --- 步骤 2: 同步域名白名单到内核 ---
                     if let Some(map) = bpf.map_mut("ALLOWED_DOMAINS") {
-                        if let Ok(mut domains_map) = HashMap::<_, DomainKey, u32>::try_from(map) {
+                        if let Ok(mut domains_map) = HashMap::<&mut aya::maps::MapData, DomainKey, u32>::try_from(map) {
                             for domain in shared_config.routes.keys() {
                                 let mut key = DomainKey { name: [0u8; 64] };
                                 let bytes = domain.as_bytes();

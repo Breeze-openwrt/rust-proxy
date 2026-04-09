@@ -54,10 +54,12 @@ json_comments = "0.2"
 
 # --- eBPF 加速框架 (Aya-rs) ---
 # aya: 纯 Rust 实现的 eBPF 加密/加载库，它是我们实现“零上下文切换转发”的钥匙。
-# 🔥 语法纠偏：Aya 0.13 使用的是 async_tokio (下划线)，而非连字符。
 aya = { version = "0.13", features = ["async_tokio"] }
 # aya-log: 允许我们在用户态实时看到 eBPF 在内核中打印的 debug 信息。
 aya-log = "0.2"
+
+# 引用共享模块
+rust-proxy-common = { path = "./rust-proxy-common", features = ["user"] }
 
 # --- 错误处理与工具 ---
 # libc: Rust 官方推出的底层 C 接口绑定。

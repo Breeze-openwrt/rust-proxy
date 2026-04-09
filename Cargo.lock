@@ -902,6 +902,7 @@ dependencies = [
  "libc",
  "monoio",
  "nix 0.29.0",
+ "rust-proxy-common",
  "serde",
  "serde_json",
  "socket2 0.5.10",

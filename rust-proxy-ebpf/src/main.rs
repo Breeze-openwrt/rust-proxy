@@ -17,7 +17,24 @@ use aya_ebpf::{
     EbpfContext, // 引入上下文 Trait，提供 as_ptr 支持。
 };
 use rust_proxy_common::{DomainKey, SessionKey};
-use core::mem;
+pub trait PtrAt {
+    fn ptr_at<T>(&self, offset: usize) -> Result<*const T, ()>;
+}
+
+impl PtrAt for TcContext {
+    #[inline(always)]
+    fn ptr_at<T>(&self, offset: usize) -> Result<*const T, ()> {
+        let start = self.data();
+        let end = self.data_end();
+        let len = core::mem::size_of::<T>();
+
+        if start + offset + len > end {
+            return Err(());
+        }
+
+        Ok((start + offset) as *const T)
+    }
+}
 
 /// 声明一个全局的 Socket 映射表
 /// 
@@ -240,6 +257,7 @@ impl TcpHdr {
     pub fn doff(&self) -> u8 { (self._bits.to_be() >> 12) as u8 }
 }
 
+#[cfg(not(test))] // 核心修正：避免与 std 冲突
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {} // 内核态 Panic 处理：保持静默，因为内核不能挂。
