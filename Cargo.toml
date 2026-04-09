@@ -66,5 +66,6 @@ panic = "abort"     # eBPF (no_std) 开发模式下必须使用 abort
 lto = true          # 开启全量链接时优化，消除跨模块调用开销。
 panic = "abort"     # 发生异常时直接退出，不进行复杂的堆栈展开，减小体积。
 opt-level = 3       # 开启最高级别的暴力优化，榨干 CPU 每一丝性能。
+debug = 2           # 🔥 关键修复：必须开启调试信息，bpf-linker 才能生成内核所需的 .BTF 段！
 codegen-units = 1   # 强制单线程代码生成，虽然编译慢，但生成的机器码运行最快。
-strip = "debuginfo" # 移除调试信息，让生成的二进制包更纯净。
+# strip = "debuginfo" # 💣 故障排查：暂时关闭强力裁剪。eBPF 需要 BTF (调试信息) 才能加载！

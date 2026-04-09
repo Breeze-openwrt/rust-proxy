@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # aya-ebpf: 内核态编程的核心
-aya-ebpf = "0.1"
+aya-ebpf = "0.1.1"
 # 引用共享模块，确保内核态使用一致的数据结构
 rust-proxy-common = { path = "../rust-proxy-common" }
 

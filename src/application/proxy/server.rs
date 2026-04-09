@@ -14,7 +14,7 @@ use monoio::io::{AsyncReadRent, AsyncWriteRentExt, Splitable};
 use std::rc::Rc;
 use std::cell::RefCell;
 #[cfg(target_os = "linux")]
-use aya::{Ebpf, programs::SkMsg};
+use aya::{Ebpf, programs::SkSkb};
 #[cfg(target_os = "linux")]
 use aya::maps::{SockMap, HashMap};
 use tracing::{info, error, debug, warn};
@@ -22,7 +22,7 @@ use futures::future::{select, Either};
 
 #[cfg(target_os = "linux")]
 /// 静态嵌入 eBPF 内核字节码 (Static Embed Bytecode)
-const BPF_BYTECODE: &[u8] = include_bytes!("../../../target/bpfel-unknown-none/release/rust_proxy_ebpf_kernel");
+const BPF_BYTECODE: &[u8] = include_bytes!("../../resources/ebpf.o");
 
 /// 代理服务器主体
 #[derive(Clone)]
@@ -48,28 +48,49 @@ impl ProxyServer {
         let mut bpf_instance = None;
         #[cfg(target_os = "linux")]
         {
-            // 使用 include_bytes! 嵌入的字节码从内存加载，不再依赖外部文件
-            match Ebpf::load(BPF_BYTECODE) {
+            // 🚀 动态优先：先尝试加载同级目录下的 ebpf.o，失败则回退到内置字节码
+            let (bytecode_data, source) = if let Ok(data) = std::fs::read("ebpf.o") {
+                (data, "外部文件 (ebpf.o)")
+            } else if let Ok(data) = std::fs::read("target/release/ebpf.o") {
+                (data, "发布目录 (target/release/ebpf.o)")
+            } else {
+                (BPF_BYTECODE.to_vec(), "内置嵌入 (Static)")
+            };
+
+            info!("🧬 eBPF 来源: {}", source);
+            info!("🧪 内存字节码指纹: {:02x?}", &bytecode_data[0..4]);
+
+            match Ebpf::load(&bytecode_data) {
                 Ok(mut bpf) => {
                     info!("🚀 eBPF 字节码加载成功，准备挂载...");
+                    // 改进后的带有详细错误日志的挂载流程
                     let mut success = false;
-                    // 使用指针绕过对 bpf 的重叠借用检查 (Map 为不可变借用，Program 为可变借用)
                     unsafe {
                         let bpf_ptr = &mut bpf as *mut Ebpf;
-                        if let Some(map) = (*bpf_ptr).map("REDIRECT_MAP") {
-                            if let Ok(sm) = SockMap::<&aya::maps::MapData>::try_from(map) {
-                                if let Some(program) = (*bpf_ptr).program_mut("fast_forward") {
-                                    if let Ok(program) = program.try_into() {
-                                        let sk_msg: &mut SkMsg = program;
-                                        if let Ok(_) = sk_msg.load() {
-                                            if let Ok(_) = sk_msg.attach(sm.fd()) {
-                                                info!("✅ eBPF 程序已成功挂载到 REDIRECT_MAP");
-                                                success = true;
+                        match (*bpf_ptr).map("REDIRECT_MAP") {
+                            Some(map) => match SockMap::<&aya::maps::MapData>::try_from(map) {
+                                Ok(sm) => match (*bpf_ptr).program_mut("fast_forward") {
+                                    Some(program) => match program.try_into() {
+                                        Ok(sk_msg) => {
+                                            let sk_msg: &mut SkSkb = sk_msg;
+                                            match sk_msg.load() {
+                                                Ok(_) => match sk_msg.attach(sm.fd()) {
+                                                    Ok(_) => {
+                                                        info!("✅ eBPF 程序已成功挂载到 REDIRECT_MAP (StreamVerdict)");
+                                                        success = true;
+                                                    }
+                                                    Err(e) => warn!("❌ eBPF 挂载错误 (attach failed): {:?}", e),
+                                                },
+                                                Err(e) => warn!("❌ eBPF 挂载错误 (load failed): {:?}", e),
                                             }
                                         }
-                                    }
-                                }
-                            }
+                                        Err(e) => warn!("❌ eBPF 挂载错误 (program_mut type mismatch): {:?}", e),
+                                    },
+                                    None => warn!("❌ eBPF 挂载错误 (找不到 program 'fast_forward')"),
+                                },
+                                Err(e) => warn!("❌ eBPF 挂载错误 (SockMap try_from failed): {:?}", e),
+                            },
+                            None => warn!("❌ eBPF 挂载错误 (找不到 map 'REDIRECT_MAP')"),
                         }
                     }
                     if success {

@@ -66,30 +66,33 @@ jobs:
           rm -rf target/bpfel-unknown-none
           
           # 🔥 关键修正 1：编译内核字节码
-          cargo build --package rust-proxy-ebpf --bin rust-proxy-ebpf-kernel --release --target bpfel-unknown-none -Z build-std=core
+          cargo build --package rust-proxy-ebpf --bin rust_proxy_ebpf_kernel --release --target bpfel-unknown-none -Z build-std=core
           
           # 🔍 校验环节：Aya 编译的 eBPF 字节码通常在 4KB~8KB 之间。
           # 我们将阈值下调至 1KB，确保不是空文件即可，同时增加调试探测。
-          BYTECODE_PATH=$(find target/bpfel-unknown-none/release -type f -name "rust-proxy-ebpf-kernel" -o -name "rust_proxy_ebpf_kernel" | head -n 1)
-          if [ -z "$BYTECODE_PATH" ] || [ ! -s "$BYTECODE_PATH" ] || [ $(stat -c%s "$BYTECODE_PATH") -lt 1024 ]; then
-            echo "❌ 错误：内核字节码校验失败！"
-            echo "探测到的路径: $BYTECODE_PATH"
-            echo "当前 target 目录结构："
-            find target -maxdepth 4
+          BYTECODE_PATH=$(find target/bpfel-unknown-none/release -type f -name "rust_proxy_ebpf_kernel" | head -n 1)
+          if [ -z "$BYTECODE_PATH" ] || [ ! -s "$BYTECODE_PATH" ] || [ $(stat -c%s "$BYTECODE_PATH") -lt 10240 ]; then
+            echo "❌ 错误：内核字节码校验失败或体积异常 (应 > 10KB)！"
             exit 1
           fi
           echo "✅ 字节码校验通过: $BYTECODE_PATH ($(stat -c%s "$BYTECODE_PATH") bytes)"
+
+          # 🔥 关键同步：将字节码拷贝到资源目录，确保 include_bytes! 抓取的是最新实弹
+          mkdir -p src/resources
+          cp "$BYTECODE_PATH" src/resources/ebpf.o
+          # 同时准备一个用于分发的外部文件
+          cp "$BYTECODE_PATH" ./ebpf.o
           
-          # 🔥 关键修正 2：编译主程序（此时 include_bytes! 读到的是刚生成的新鲜实弹）
+          # 🔥 关键修正 2：编译主程序 (标准版)
           cargo build --package rust-proxy --bin rust-proxy --release
-          find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-std
+          find target/release -maxdepth 1 -type f -name "rust-proxy" -executable | xargs -I {} mv {} ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
         # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化
         run: |
-          # 🔥 关键修正 3：同上，显式锚定二进制并动态提取
+          # 🔥 关键修正 3：同样需要确保 v3 版本也包含了最新的内嵌字节码
           RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --bin rust-proxy --release
-          find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-v3
+          find target/release -maxdepth 1 -type f -name "rust-proxy" -executable | xargs -I {} mv {} ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases
         # 💣 模仿 gnet-proxy，清空历史残骸，只留独苗
@@ -107,7 +110,9 @@ jobs:
           TAG_NAME="v$(date +'%Y.%m.%d-%H%M')"
           gh release create "$TAG_NAME" \
             --title "Latest High-Performance Build ($TAG_NAME)" \
-            --notes "✨ 基于 Rust + io_uring + eBPF 的高性能 SNI 代理。包含标准兼容版与 AVX2 提速版。" \
+            --notes "✨ 基于 Rust + io_uring + eBPF 的高性能 SNI 代理。包含标准版、AVX2 提速版、内核字节码 (ebpf.o) 及示例配置。" \
             ./rust-proxy-linux-amd64-std \
-            ./rust-proxy-linux-amd64-v3
+            ./rust-proxy-linux-amd64-v3 \
+            ./ebpf.o \
+            ./config.jsonc
           echo "🎉 全球发布圆满成功！"

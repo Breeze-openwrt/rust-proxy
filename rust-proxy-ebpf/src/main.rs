@@ -10,10 +10,11 @@
 #![no_main] // BPF 程序没有常规的 main 函数，它是驱动程序式的响应模式。
 
 use aya_ebpf::{
-    macros::{sk_msg, map}, // 引入 BPF 程序宏。
+    macros::{stream_verdict, map}, // 引入 BPF 程序宏。
     maps::{SockMap, HashMap}, // 引入 Socket 映射表与哈希表。
-    programs::SkMsgContext, // 消息上下文。
-    helpers::bpf_get_socket_cookie, // 获取 Socket 唯一标识的黑科技。
+    programs::SkBuffContext, // 消息上下文。
+    helpers:: bpf_get_socket_cookie, // 获取 Socket 唯一标识的黑科技。
+    EbpfContext, // 引入上下文 Trait，提供 as_ptr 支持。
 };
 
 /// 声明一个全局的 Socket 映射表
@@ -26,19 +27,29 @@ static REDIRECT_MAP: SockMap = SockMap::with_max_entries(1024, 0);
 #[map]
 static PEER_MAP: HashMap<u64, u32> = HashMap::with_max_entries(1024, 0);
 
+/// 许可证 (License) - eBPF 的法典
+/// 
+/// 必须声明 GPL 兼容权限，内核才允许加载并调用 get_socket_cookie 等核心函数。
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "license")]
+pub static _LICENSE: [u8; 4] = *b"GPL\0";
+
 /// 核心重定向逻辑
 /// 
-/// 每当有数据包 (Message) 到达受监控的 Socket 时，内核就会调用这个函数。
-#[sk_msg]
-pub fn fast_forward(ctx: SkMsgContext) -> u32 {
+/// 每当有数据流到达时，内核就会调用这个函数进行判定。
+/// 🔥 突围：切换到 stream_verdict 挂载点，因为该挂载点合法支持获取 Socket Cookie。
+#[stream_verdict]
+#[inline(always)]
+pub fn fast_forward(ctx: SkBuffContext) -> u32 {
     // 1. 获取当前 Socket 的唯一“身份证” (Cookie)
-    let cookie = unsafe { bpf_get_socket_cookie(ctx.msg as *mut _) };
+    // 提示：在 stream_verdict 中 ctx.as_ptr() 返回的是 *mut __sk_buff
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.as_ptr() as *mut _) };
     
     // 2. 在关系表中查找它的“另一半”在哪
     if let Some(peer_index) = unsafe { PEER_MAP.get(&cookie) } {
         // 3. 暴力重定向：让数据包直接“瞬移”到目标端口
         unsafe {
-            let _ = REDIRECT_MAP.redirect_msg(&ctx, *peer_index, 0);
+            let _ = REDIRECT_MAP.redirect_skb(&ctx, *peer_index, 0);
         }
     }
 
