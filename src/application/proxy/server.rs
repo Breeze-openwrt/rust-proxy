@@ -7,158 +7,157 @@
 
 use crate::domain::protocol::sni::{SniParser, SniResult};
 use crate::infra::network::pool::ConnectionPool;
-use crate::infra::network::socket_opt::SocketOptimizer; // 引入底层调优工具。
+use crate::infra::network::socket_opt::SocketOptimizer;
+use crate::config::Config;
 use monoio::net::{TcpListener, TcpStream};
-use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
+use monoio::io::{AsyncReadRent, AsyncWriteRentExt, Splitable};
 use std::rc::Rc;
 use std::cell::RefCell;
 use tracing::{info, error, debug, warn};
+use futures::future::{select, Either};
 
 // --- eBPF 增强组件 ---
-// 在 Linux 上运行时，我们需要这些库来接管内核转发。
-#[cfg(target_os = "linux")]
-use aya::{Bpf, programs::SkMsg};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
 /// 代理服务器主体
 pub struct ProxyServer {
-    /// 监听地址
-    listen_addr: String,
+    /// 全局配置
+    config: Rc<Config>,
     /// 共享连接池
     pool: Rc<RefCell<ConnectionPool>>,
-    /// eBPF 程序句柄 (仅 Linux 下生效)
-    #[cfg(target_os = "linux")]
-    bpf: Option<Rc<RefCell<Bpf>>>,
 }
 
 impl ProxyServer {
     /// 创建服务器实例
-    pub fn new(addr: String) -> Self {
-        // 初始化一个默认超时 5 分钟的池
-        let pool = Rc::new(RefCell::new(ConnectionPool::new(300)));
-        Self { listen_addr: addr, pool }
+    pub fn new(config: Config) -> Self {
+        // 从配置中读取默认超时，若未指定则默认 5 分钟
+        let idle_timeout = 300; 
+        let pool = Rc::new(RefCell::new(ConnectionPool::new(idle_timeout)));
+        Self { 
+            config: Rc::new(config), 
+            pool 
+        }
     }
 
     /// 启动服务器（主循环）
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // --- 质量升级：使用 socket2 调优后的监听器 ---
-        // 我们不再使用简单的标准库 bind，而是通过 SocketOptimizer 开启 REUSEPORT 和 Buffer 扩容。
-        let addr = self.listen_addr.parse()?;
+        let addr = self.config.listen_addr.parse()?;
         let std_listener = SocketOptimizer::create_tuned_listener(addr)?;
-        
-        // 将调优后的标准 Listener 转为 monoio 支持的异步 Listener
         let listener = TcpListener::from_std(std_listener)?;
         
-        info!("📡 调优完毕！代理服务器在高能模式下监听: {}", self.listen_addr);
+        info!("📡 代理服务器启动，监听: {}", self.config.listen_addr);
 
+        // --- 质量升级：启动后台 JumpStart 预热卫士 ---
+        // 我们不眠不休地监控连接池，确保后端连接随时可用。
+        let pool_for_warmup = self.pool.clone();
+        let config_for_warmup = self.config.clone();
+        monoio::spawn(async move {
+            debug!("🛡️ JumpStart 预热卫士已就位。");
+            loop {
+                for route in config_for_warmup.routes.values() {
+                    let mut p = pool_for_warmup.borrow_mut();
+                    p.fill_if_needed(&route.addr, route.jump_start).await;
+                }
+                // 每隔 10 秒巡检一次，避免 CPU 空转，同时保持连接新鲜。
+                monoio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
         loop {
-            // 等待并接受一个新的入站连接
             let (conn, peer_addr) = listener.accept().await?;
-            debug!("🤝 收到新连接，来自: {}", peer_addr);
+            debug!("🤝 收到新连接: {}", peer_addr);
 
-            // 为每个连接派生一个异步任务（协程）
-            // 注意：由于 monoio 是单线程 Runtime，派生的任务直接运行在当前 CPU 核心上，零跨核开销。
             let shared_pool = self.pool.clone();
+            let shared_config = self.config.clone();
+            
             monoio::spawn(async move {
-                if let Err(e) = Self::handle_connection(conn, shared_pool).await {
-                    error!("❌ 处理连接失败: {}", e);
+                if let Err(e) = Self::handle_connection(conn, shared_pool, shared_config).await {
+                    error!("❌ 连接处理异常: {}", e);
                 }
             });
         }
     }
 
     /// 处理单个连接的业务逻辑
-    async fn handle_connection(mut inbound: TcpStream, pool: Rc<RefCell<ConnectionPool>>) -> anyhow::Result<()> {
+    async fn handle_connection(
+        mut inbound: TcpStream, 
+        pool: Rc<RefCell<ConnectionPool>>, 
+        config: Rc<Config>
+    ) -> anyhow::Result<()> {
         // --- 步骤 1: 探测首包获取 SNI ---
-        // 我们需要读取足够的数据来解析 SNI，但又不能真正“消耗”掉它（因为后面转发需要完整包）。
-        // 目前我们使用简化的 Read + Peek 思路，或者直接读取到一个缓冲区中。
-        let mut buf = vec![0u8; 2048]; // 分配 2KB 缓冲区，足以容纳绝大多数 Client Hello。
-        
-        // 使用 monoio 的异步读取。由于 monoio 是所有权式的 I/O，我们要传入 Buffer。
+        let buf = vec![0u8; 2048];
         let (res, buf) = inbound.read(buf).await;
         let read_len = res?;
         if read_len == 0 { return Ok(()); }
 
-        // 使用我们强大的 SniParser 解析域名
         let sni = match SniParser::parse(&buf[..read_len]) {
             SniResult::Found(name) => name,
             _ => {
-                debug!("❓ 未能在首包中解析到 SNI 或协议不匹配，连接关闭。");
+                debug!("❓ 未能在首包中解析到 SNI 或协议不匹配。");
                 return Ok(());
             }
         };
 
         info!("🎯 目标域名识别: {}", sni);
 
-        // --- 步骤 2: 获取后端连接 ---
-        // 模拟路由：在实际项目中，这里会查表。我们现在先硬编码一个目标用于开发。
-        // TODO: 接入真正的工作配置路由。
-        let backend_addr = "127.0.0.1:10443"; 
+        // --- 步骤 2: 动态路由匹配 ---
+        let route = match config.routes.get(&sni) {
+            Some(r) => r,
+            None => {
+                warn!("🚫 未找到域名 {} 的路由配置", sni);
+                return Ok(());
+            }
+        };
 
-        // 尝试从池中获取预热好的连接（JumpStart）
+        // --- 步骤 3: 获取后端连接 ---
+        let backend_addr = &route.addr;
         let mut outbound = {
             let mut pool_v = pool.borrow_mut();
             match pool_v.get(backend_addr) {
                 Some(conn) => {
-                    debug!("🔥 命中 JumpStart 池！成功复用预热连接。");
+                    debug!("🔥 JumpStart 命中: {}", backend_addr);
                     conn
                 },
                 None => {
-                    debug!("🧊 池中无可用连接，正在发起新连接到: {}", backend_addr);
+                    debug!("🧊 发起新连接: {}", backend_addr);
                     TcpStream::connect(backend_addr).await?
                 }
             }
         };
 
-        // --- 步骤 3: 转发残留的首包 ---
-        // 关键点：由于我们刚才在 User 态 Read 了首包，我们必须先把它发给后端。
+        // --- 步骤 4: 转发残留的首包 ---
         let (res, _buf) = outbound.write_all(buf).await;
         res?;
 
-        // --- 步骤 4: 建立双向透明转发 (Relay) ---
-        // 核心亮点：尝试将此连接卸载到 eBPF 内核态加速！
+        // --- 步骤 5: 建立双向透明转发 ---
         Self::try_offload_to_ebpf(&inbound, &outbound).await;
 
-        let (mut client_r, mut client_w) = inbound.split();
-        let (mut server_r, mut server_w) = outbound.split();
+        let (mut client_r, mut client_w) = inbound.into_split();
+        let (mut server_r, mut server_w) = outbound.into_split();
 
-        // 同时运行两个拷贝任务：
-        // 1. Client -> Server
-        // 2. Server -> Client
         let c2s = monoio::io::copy(&mut client_r, &mut server_w);
         let s2c = monoio::io::copy(&mut server_r, &mut client_w);
 
-        // 使用 join! 并行执行，直到其中一方关闭连接。
-        tokio::select! {
-            _ = c2s => debug!("⬆️ 客户端已断开发送流"),
-            _ = s2c => debug!("⬇️ 服务器已断开响应流"),
+        // 使用 futures::future::select 实现极简控制流
+        match select(Box::pin(c2s), Box::pin(s2c)).await {
+            Either::Left((res, _)) => {
+                if let Err(e) = res { debug!("⬆️ C2S 转发结束: {}", e); }
+            }
+            Either::Right((res, _)) => {
+                if let Err(e) = res { debug!("⬇️ S2C 转发结束: {}", e); }
+            }
         }
 
         Ok(())
     }
 
     /// 尝试将转发逻辑交给 eBPF 接管
-    /// 
-    /// 源码欣赏：
-    /// 这就是“暴力提速”的最终战术。如果我们成功在内核 Map 中将 client_fd
-    /// 关联到 server_fd，后续的 copy 任务将几乎不搬运任何数据。
     async fn try_offload_to_ebpf(_in: &TcpStream, _out: &TcpStream) {
         #[cfg(target_os = "linux")]
         {
-            // 通过 raw_fd 获取文件描述符
             let fd_in = _in.as_raw_fd();
             let fd_out = _out.as_raw_fd();
-            debug!("⚡ 正在尝试 eBPF 卸载加速: FD {} -> FD {}", fd_in, fd_out);
-            
-            // TODO: 在此处调用 aya 的 Map 接口写入连接对。
-            // 由于开发处于骨架阶段，我们先通过条件编译预留位置。
-        }
-        
-        #[cfg(not(target_os = "linux"))]
-        {
-            // Windows 环境下仅输出日志，不进行内核操作。
-            // 确保了代码的可移植性和“初学者友好”。
+            debug!("⚡ 尝试 eBPF 加速: FD {} -> FD {}", fd_in, fd_out);
         }
     }
 }

@@ -81,5 +81,18 @@ impl SniParser {
     }
 }
 
-// 注意：原先的测试用例依旧有效。由于库的接口更健壮，
-// 我们不再需要手动编写大量的偏移量计算，代码变得极度清晰！
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sni_parser_robustness() {
+        // 测试非法数据是否会被优雅处理
+        let junk_data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00];
+        match SniParser::parse(&junk_data) {
+            SniResult::Error | SniResult::Incomplete => (),
+            _ => panic!("Junk data should not result in a Found result"),
+        }
+    }
+}

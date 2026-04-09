@@ -37,8 +37,12 @@ impl SocketOptimizer {
         // 默认缓冲区太小，容易导致接收窗口快速填满。
         // 我们将其提升到 4MB，让发送端可以“撒开了跑”，不被 TCP 流量控制限制。
         let buf_size = 4 * 1024 * 1024; // 4MiB
-        socket.set_recv_buffer_size(buf_size)?; 
-        socket.set_send_buffer_size(buf_size)?; 
+        if let Err(e) = socket.set_recv_buffer_size(buf_size) {
+            tracing::warn!("⚠️ 无法设置接收缓冲区大小: {}", e);
+        }
+        if let Err(e) = socket.set_send_buffer_size(buf_size) {
+            tracing::warn!("⚠️ 无法设置发送缓冲区大小: {}", e);
+        }
 
         // 绑定地址
         socket.bind(&addr.into())?;

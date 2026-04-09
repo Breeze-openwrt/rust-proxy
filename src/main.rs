@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- 步骤 3: 初始化并启动代理服务 ---
     // 我们的架构是分布式+分层的，ProxyServer 负责编排业务流程。
-    let server = ProxyServer::new(config.listen_addr);
+    let server = ProxyServer::new(config);
     
     // 启动主循环，由 monoio 接管异步调度。
     server.run().await?;
