@@ -27,10 +27,10 @@ static REDIRECT_MAP: SockMap = SockMap::with_max_entries(1024, 0);
 /// 每当有数据包 (Message) 到达受监控的 Socket 时，内核就会调用这个函数。
 #[sk_msg]
 pub fn fast_forward(ctx: SkMsgContext) -> u32 {
-    // --- 暴力提速：核心修正 ---
-    // 在 aya-ebpf 中，重定向指令目前是由映射表（REDIRECT_MAP）直接发起的。
-    // 我们命令它将当前的上下文（ctx）指引向关联的 Socket。
-    match REDIRECT_MAP.redirect(&ctx, 0, 0) {
+    // --- 暴力重定向：精准纠偏 ---
+    // 根据编译器高度智能的提示，处理 sk_msg 程序的重定向应改用专属的 redirect_msg 方法。
+    // 第一个 0 代表 flag，第二个 0 代表额外的控制位。
+    match REDIRECT_MAP.redirect_msg(&ctx, 0, 0) {
         Ok(_) => 1, // 成功重定向：这里的 1 对应内核中的 SK_PASS。
         Err(_) => 1, // 兜底策略：失败也让数据流向用户态，保证代理逻辑稳健。
     }
