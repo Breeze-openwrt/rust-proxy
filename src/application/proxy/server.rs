@@ -20,6 +20,9 @@ use aya::maps::{SockMap, HashMap};
 use tracing::{info, error, debug, warn};
 use futures::future::{select, Either};
 
+#[cfg(target_os = "linux")]
+/// 静态嵌入 eBPF 内核字节码 (Static Embed Bytecode)
+const BPF_BYTECODE: &[u8] = include_bytes!("../../../target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel");
 
 /// 代理服务器主体
 #[derive(Clone)]
@@ -45,9 +48,8 @@ impl ProxyServer {
         let mut bpf_instance = None;
         #[cfg(target_os = "linux")]
         {
-            // 尝试加载 eBPF 字节码
-            let bpf_path = "./target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel";
-            match Ebpf::load_file(bpf_path) {
+            // 使用 include_bytes! 嵌入的字节码从内存加载，不再依赖外部文件
+            match Ebpf::load(BPF_BYTECODE) {
                 Ok(mut bpf) => {
                     info!("🚀 eBPF 字节码加载成功，准备挂载...");
                     let mut success = false;
