@@ -10,7 +10,7 @@ aya-ebpf = "0.1"
 rust-proxy-common = { path = "../rust-proxy-common" }
 
 [[bin]]
-name = "rust-proxy"
+name = "rust-proxy-ebpf-kernel" # 🔥 纠偏：明确重命名为内核字节码标识，避免与用户态主程序混淆
 path = "src/main.rs"
 
 [profile.release]

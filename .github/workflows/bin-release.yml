@@ -61,17 +61,19 @@ jobs:
       - name: 🍳 Compile Linux amd64 Standard (Compatibility)
         # 兼容型版本，适用于所有 amd64 机器
         run: |
-          # 🔥 关键修正 1：指定 eBPF 编译目标为 bpfel，防止误用宿主机链接器链接内核代码
-          cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none && cd ..
-          # 🔥 关键修正 2：显式指定只通过主包 rust-proxy，排除 eBPF 模块对用户态编译的干扰
-          cargo build -p rust-proxy --release
+          # 🔥 关键修正 1：针对 no-std 环境强制从源码构建核心库 (Z build-std)
+          # 同时指定正确的重命名后的二进制目标名称
+          cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none -Z build-std=core && cd ..
+          
+          # 🔥 关键修正 2：利用 Workspace 模式显式指定主包名，彻底杜绝歧义
+          cargo build --package rust-proxy --release
           mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
-        # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化 (对标 Go 的 GOAMD64=v3)
+        # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化
         run: |
-          # 🔥 关键修正 3：在 v3 编译时也必须显式限定 package
-          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build -p rust-proxy --release
+          # 🔥 关键修正 3：在工作区模式下强制锚定主项目 bin
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --release
           mv target/release/rust-proxy ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases

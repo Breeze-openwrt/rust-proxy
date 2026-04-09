@@ -3,6 +3,15 @@ name = "rust-proxy"
 version = "0.1.0"
 edition = "2024"
 
+# --- 开启工业级工作区模式 (Rust Workspace) ---
+# 所有的子项目（内核态、共享库等）都归属于同一个工作区管理。
+# 这样做的好处是：cargo 在编译时能清晰划分 scope，彻底解决重名包歧义。
+[workspace]
+members = [
+    "rust-proxy-ebpf",
+    "rust-proxy-common",
+]
+
 [dependencies]
 # --- 核心异步运行时 (Core Runtime) ---
 # monoio: 这是极致性能的关键。它基于 io_uring 构建，采用了 Thread-per-core 架构，
