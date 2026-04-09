@@ -27,15 +27,16 @@ static REDIRECT_MAP: SockMap = SockMap::with_max_entries(1024, 0);
 /// 每当有数据包 (Message) 到达受监控的 Socket 时，内核就会调用这个函数。
 #[sk_msg]
 pub fn fast_forward(ctx: SkMsgContext) -> u32 {
-    // --- 暴力重定向：类型对齐 ---
-    // 根据编译器高度智能的反馈，redirect_msg 返回的是原始的 i64 状态码，
-    // 而非 Rust 用户态常见的 Result 枚举。
-    // 我们直接执行该指令，并将决策权交给内核。
-    let _ = REDIRECT_MAP.redirect_msg(&ctx, 0, 0);
+    // --- 暴力重定向：安全承诺 ---
+    // 由于 redirect_msg 是直接在内核态操纵 Socket 数据流，
+    // 在 Rust 语法中它被标记为 unsafe。
+    // 但请放心，eBPF 程序在加载时会经过内核“验证器”的魔鬼检查，确保绝对安全。
+    unsafe {
+        let _ = REDIRECT_MAP.redirect_msg(&ctx, 0, 0);
+    }
 
     // 源码级解释：
     // 返回 1 代表 SK_PASS，表示该消息处理完成且被允许通过。
-    // 即使重定向失败，我们也交由用户态做兜底转发，确保服务 100% 可用。
     1
 }
 
