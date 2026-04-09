@@ -4,5 +4,4 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# aya-ebpf: 提供内核态所需的基础结构
-aya-ebpf = "0.1" 
+# 暂时无需依赖，保持纯粹的 no_std 数据结构定义

@@ -62,10 +62,19 @@ jobs:
       - name: 🍳 Compile Linux amd64 Standard (Compatibility)
         # 兼容型版本，适用于所有 amd64 机器
         run: |
-          # 🔥 关键修正 1：移除 cd，直接从根目录触发内核字节码编译，确保产物路径在根目录 target
+          # 🔥 彻底解疑：强力清除可能存在的缓存或占位符，确保字节码真实
+          rm -rf target/bpfel-unknown-none
+          
+          # 🔥 关键修正 1：编译内核字节码
           cargo build --package rust-proxy-ebpf --bin rust-proxy-ebpf-kernel --release --target bpfel-unknown-none -Z build-std=core
           
-          # 🔥 关键修正 2：针对 Native 构建移除冗余 --target，Cargo 将默认输出到 target/release
+          # 🔍 校验环节：如果字节码文件无效（小于 10KB 通常说明编译有问题），直接熔断流水线
+          BYTECODE_PATH="target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel"
+          if [ ! -s "$BYTECODE_PATH" ] || [ $(stat -c%s "$BYTECODE_PATH") -lt 10240 ]; then
+            echo "❌ 错误：内核字节码校验失败，文件不存在或体积异常！" && exit 1
+          fi
+          
+          # 🔥 关键修正 2：编译主程序（此时 include_bytes! 读到的是刚生成的新鲜实弹）
           cargo build --package rust-proxy --bin rust-proxy --release
           find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-std
 

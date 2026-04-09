@@ -733,9 +733,6 @@ dependencies = [
 [[package]]
 name = "rust-proxy-common"
 version = "0.1.0"
-dependencies = [
- "aya-ebpf",
-]
 
 [[package]]
 name = "rust-proxy-ebpf"

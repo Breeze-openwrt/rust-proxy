@@ -13,7 +13,7 @@ use rust_proxy::config::Config; // 引入配置模块。
 use rust_proxy::application::proxy::server::ProxyServer; // 引入应用层的代理服务器实现。
 
 /// 程序主入口
-#[monoio::main]
+#[monoio::main(enable_timer = true)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- 步骤 1: 初始化日志系统 ---
     let subscriber = FmtSubscriber::builder()
