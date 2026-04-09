@@ -1,5 +1,9 @@
 {
   "listen_addr": "0.0.0.0:443",
+  "log": {
+    "level": "info",
+    "output": "stdout"
+  },
   "routes": {
     "updates.cdn-apple.com": {
       "addr": "127.0.0.1:10443",

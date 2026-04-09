@@ -9,41 +9,150 @@
 
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
-use rust_proxy::config::Config; // 引入配置模块。
-use rust_proxy::application::proxy::server::ProxyServer; // 引入应用层的代理服务器实现。
+use rust_proxy::config::Config;
+use rust_proxy::application::proxy::server::ProxyServer;
+use clap::Parser;
+use std::str::FromStr;
+use std::fs;
+use std::path::Path;
+use nix::sys::signal::{self, Signal};
+use nix::unistd::Pid;
+use daemonize::Daemonize;
 
-/// 程序主入口
+/// Rust-Proxy 命令行参数
+#[derive(Parser, Debug, Clone)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    /// 配置文件路径
+    #[arg(short, long, default_value = "config.jsonc")]
+    config: String,
+
+    /// 开启详细日志 (-v: DEBUG, -vv: TRACE)
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// 以守护进程模式运行（后台运行）
+    #[arg(short, long)]
+    daemon: bool,
+
+    /// PID 文件路径
+    #[arg(short, long)]
+    pid_file: Option<String>,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // --- 步骤 1: 解析命令行参数 ---
+    let cli = Cli::parse();
+
+    // --- 步骤 2: 确定 PID 文件位置 ---
+    let pid_path = cli.pid_file.clone().unwrap_or_else(|| {
+        if nix::unistd::getuid().is_root() {
+            "/var/run/rust-proxy.pid".to_string()
+        } else {
+            "/tmp/rust-proxy.pid".to_string()
+        }
+    });
+
+    // --- 步骤 3: 尝试杀掉旧进程 (夺舍逻辑) ---
+    if let Ok(content) = fs::read_to_string(&pid_path) {
+        if let Ok(old_pid) = content.trim().parse::<i32>() {
+            let pid = Pid::from_raw(old_pid);
+            // 检查进程是否还在
+            if signal::kill(pid, None).is_ok() {
+                println!("⚠️ 发现正在运行的旧实例 (PID: {}), 正在尝试终止...", old_pid);
+                let _ = signal::kill(pid, Signal::SIGTERM);
+                // 给一点时间退出
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+    }
+
+    // --- 步骤 4: 背景化 (分身术) ---
+    if cli.daemon {
+        let stdout = fs::File::create("/dev/null").unwrap();
+        let stderr = fs::File::create("/dev/null").unwrap();
+
+        let daemonize = Daemonize::new()
+            .pid_file(&pid_path) // 自动处理 PID 文件的写入和清理
+            .chown_pid_file(true)
+            .working_directory(".")
+            .stdout(stdout)
+            .stderr(stderr);
+
+        match daemonize.start() {
+            Ok(_) => println!("🚀 Rust-Proxy 已切入后台运行。"),
+            Err(e) => {
+                eprintln!("❌ 无法切入后台运行: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // 非后台模式也要写 PID 文件以便下次“被夺舍”
+        fs::write(&pid_path, std::process::id().to_string())?;
+    }
+
+    // --- 步骤 5: 启动异步运行时并执行核心逻辑 ---
+    // 通过手动调用被 #[monoio::main] 修饰的异步函数来进入异步世界
+    async_main(cli)
+}
+
+/// 异步主函数，处理配置文件加载和日志初始化
 #[monoio::main(enable_timer = true)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // --- 步骤 1: 初始化日志系统 ---
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("无法设置全局日志订阅者");
-
-    info!("🚀 Rust-Proxy 高性能分流服务器启动中...");
-
-    // --- 步骤 2: 加载配置文件 ---
-    // 在实际运行中，我们可以从命令行参数获取路径，现在先默认加载当前目录。
-    let config_path = "config.jsonc";
-    let config = match Config::load(config_path) {
-        Ok(c) => {
-            info!("📖 配置文件加载成功: {}", config_path);
-            c
-        },
+async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // 加载配置
+    let config = match Config::load(&cli.config) {
+        Ok(c) => c,
         Err(e) => {
-            info!("⚠️ 无法读取 config.jsonc，正在使用默认配置示例。错误: {}", e);
-            // 这里可以提供一个备用的硬编码默认配置以便快速启动
+            eprintln!("⚠️ 无法读取配置文件 {}，错误: {}", cli.config, e);
             return Err(e.into());
         }
     };
 
-    // --- 步骤 3: 初始化并启动代理服务 ---
-    // 我们的架构是分布式+分层的，ProxyServer 负责编排业务流程。
+    // 初始化日志
+    let log_level = if cli.verbose > 0 {
+        match cli.verbose {
+            1 => Level::DEBUG,
+            _ => Level::TRACE,
+        }
+    } else {
+        config.log.as_ref()
+            .and_then(|l| l.level.as_ref())
+            .and_then(|s| Level::from_str(s).ok())
+            .unwrap_or(Level::INFO)
+    };
+
+    let log_output = config.log.as_ref()
+        .and_then(|l| l.output.as_ref())
+        .map(|s| s.as_str())
+        .unwrap_or("stdout");
+
+    let _guard = if log_output != "stdout" && log_output != "" {
+        let path = Path::new(log_output);
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("rust-proxy.log");
+        
+        let file_appender = tracing_appender::rolling::never(parent, filename);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(log_level)
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).ok();
+        Some(guard)
+    } else {
+        let subscriber = FmtSubscriber::builder()
+            .with_max_level(log_level)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).ok();
+        None
+    };
+
+    info!("🚀 Rust-Proxy 服务逻辑已就绪");
+    info!("📊 当前日志级别: {}", log_level);
+
     let server = ProxyServer::new(config);
-    
-    // 启动主循环，由 monoio 接管异步调度。
     server.run().await?;
 
     Ok(())
