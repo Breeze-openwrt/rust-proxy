@@ -22,7 +22,7 @@ use futures::future::{select, Either};
 
 #[cfg(target_os = "linux")]
 /// 静态嵌入 eBPF 内核字节码 (Static Embed Bytecode)
-const BPF_BYTECODE: &[u8] = include_bytes!("../../../target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel");
+const BPF_BYTECODE: &[u8] = include_bytes!("../../../target/bpfel-unknown-none/release/rust_proxy_ebpf_kernel");
 
 /// 代理服务器主体
 #[derive(Clone)]
@@ -175,7 +175,12 @@ impl ProxyServer {
                 },
                 None => {
                     debug!("🧊 发起新连接: {}", backend_addr);
-                    TcpStream::connect(backend_addr).await?
+                    // 核心修复：优先尝试解析为 SocketAddr，防止 IP 字符串触发不可靠的 DNS 解析
+                    if let Ok(addr) = backend_addr.parse::<std::net::SocketAddr>() {
+                        TcpStream::connect(addr).await?
+                    } else {
+                        TcpStream::connect(backend_addr).await?
+                    }
                 }
             }
         };
