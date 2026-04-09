@@ -61,17 +61,17 @@ jobs:
       - name: 🍳 Compile Linux amd64 Standard (Compatibility)
         # 兼容型版本，适用于所有 amd64 机器
         run: |
-          # 注意：这里我们先手动编译 ebpf 子项目（如果有特定的构建逻辑）
-          # 假设我们需要先编译内核态
-          cd rust-proxy-ebpf && cargo build --release && cd ..
-          cargo build --release
+          # 🔥 关键修正 1：指定 eBPF 编译目标为 bpfel，防止误用宿主机链接器链接内核代码
+          cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none && cd ..
+          # 🔥 关键修正 2：显式指定只通过主包 rust-proxy，排除 eBPF 模块对用户态编译的干扰
+          cargo build -p rust-proxy --release
           mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
         # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化 (对标 Go 的 GOAMD64=v3)
-        # 这会自动开启 AVX2, BMI2, FMA 等指令集，实现最高效的数据包分流。
         run: |
-          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --release
+          # 🔥 关键修正 3：在 v3 编译时也必须显式限定 package
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build -p rust-proxy --release
           mv target/release/rust-proxy ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases
@@ -92,5 +92,5 @@ jobs:
             --title "Latest High-Performance Build ($TAG_NAME)" \
             --notes "✨ 基于 Rust + io_uring + eBPF 的高性能 SNI 代理。包含标准兼容版与 AVX2 提速版。" \
             ./rust-proxy-linux-amd64-std \
-            ./rust-proxy-linux-amd64-avx2
+            ./rust-proxy-linux-amd64-v3
           echo "🎉 全球发布圆满成功！"
