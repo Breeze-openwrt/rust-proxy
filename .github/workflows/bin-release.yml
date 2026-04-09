@@ -68,11 +68,17 @@ jobs:
           # 🔥 关键修正 1：编译内核字节码
           cargo build --package rust-proxy-ebpf --bin rust-proxy-ebpf-kernel --release --target bpfel-unknown-none -Z build-std=core
           
-          # 🔍 校验环节：如果字节码文件无效（小于 10KB 通常说明编译有问题），直接熔断流水线
-          BYTECODE_PATH="target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel"
-          if [ ! -s "$BYTECODE_PATH" ] || [ $(stat -c%s "$BYTECODE_PATH") -lt 10240 ]; then
-            echo "❌ 错误：内核字节码校验失败，文件不存在或体积异常！" && exit 1
+          # 🔍 校验环节：Aya 编译的 eBPF 字节码通常在 4KB~8KB 之间。
+          # 我们将阈值下调至 1KB，确保不是空文件即可，同时增加调试探测。
+          BYTECODE_PATH=$(find target/bpfel-unknown-none/release -type f -name "rust-proxy-ebpf-kernel" -o -name "rust_proxy_ebpf_kernel" | head -n 1)
+          if [ -z "$BYTECODE_PATH" ] || [ ! -s "$BYTECODE_PATH" ] || [ $(stat -c%s "$BYTECODE_PATH") -lt 1024 ]; then
+            echo "❌ 错误：内核字节码校验失败！"
+            echo "探测到的路径: $BYTECODE_PATH"
+            echo "当前 target 目录结构："
+            find target -maxdepth 4
+            exit 1
           fi
+          echo "✅ 字节码校验通过: $BYTECODE_PATH ($(stat -c%s "$BYTECODE_PATH") bytes)"
           
           # 🔥 关键修正 2：编译主程序（此时 include_bytes! 读到的是刚生成的新鲜实弹）
           cargo build --package rust-proxy --bin rust-proxy --release
