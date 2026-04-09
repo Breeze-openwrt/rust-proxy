@@ -29,6 +29,8 @@ use futures::future::{select, Either};
 /// 静态嵌入 eBPF 内核字节码 (Static Embed Bytecode)
 const BPF_BYTECODE: &[u8] = include_bytes!("../../resources/ebpf.o");
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 /// 代理服务器主体
 #[derive(Clone)]
 pub struct ProxyServer {
@@ -40,6 +42,8 @@ pub struct ProxyServer {
     bpf: Option<Rc<RefCell<Ebpf>>>,
     #[cfg(target_os = "linux")]
     next_index: Rc<RefCell<u32>>,
+    /// 活跃连接计数器 (平滑下线的核心)
+    active_connections: Rc<AtomicUsize>,
 }
 
 impl ProxyServer {
@@ -53,7 +57,7 @@ impl ProxyServer {
         let mut bpf_instance = None;
         #[cfg(target_os = "linux")]
         {
-            // 🚀 动态优先：先尝试加载同级目录下的 ebpf.o，失败则回退到内置字节码
+            // 🚀 动态优先：先尝试加载同级目录下的 ebpf.o
             let (bytecode_data, source) = if let Ok(data) = std::fs::read("ebpf.o") {
                 (data, "外部文件 (ebpf.o)")
             } else if let Ok(data) = std::fs::read("target/release/ebpf.o") {
@@ -70,7 +74,7 @@ impl ProxyServer {
                     info!("🚀 eBPF 字节码加载成功，准备挂载...");
                     
                     // --- 步骤 1: 挂载 TC 过滤器 (针对域名侦听和防御) ---
-                    let _ = tc::qdisc_add_clsact("eth0"); // 尝试为 eth0 添加 clsact (忽略错误，可能已存在)
+                    let _ = tc::qdisc_add_clsact("eth0");
                     if let Some(prog) = bpf.program_mut("filter_sni") {
                         if let Ok(tc_prog) = prog.try_into() {
                             let tc_prog: &mut SchedClassifier = tc_prog;
@@ -147,50 +151,81 @@ impl ProxyServer {
             bpf: bpf_instance,
             #[cfg(target_os = "linux")]
             next_index: Rc::new(RefCell::new(0)),
+            active_connections: Rc::new(AtomicUsize::new(0)),
         }
     }
 
-    /// 启动服务器（主循环）
-    pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+    /// 启动服务器（主循环，支持平滑下线）
+    pub async fn run(&self, mut shutdown_rx: futures::channel::oneshot::Receiver<()>) -> Result<(), Box<dyn std::error::Error>> {
         let addr = self.config.listen_addr.parse()?;
         let std_listener = SocketOptimizer::create_tuned_listener(addr)?;
         let listener = TcpListener::from_std(std_listener)?;
         
         info!("📡 代理服务器启动，监听: {}", self.config.listen_addr);
 
-        // --- 质量升级：启动后台 JumpStart 预热卫士 ---
-        // 我们不眠不休地监控连接池，确保后端连接随时可用。
+        // --- 启动后台 JumpStart 预热卫士 ---
         let pool_for_warmup = self.pool.clone();
         let config_for_warmup = self.config.clone();
         monoio::spawn(async move {
-            debug!("🛡️ JumpStart 预热卫士已就位。");
             loop {
                 for route in config_for_warmup.routes.values() {
                     let mut p = pool_for_warmup.borrow_mut();
                     p.fill_if_needed(&route.addr, route.jump_start).await;
                 }
-                // 每隔 10 秒巡检一次，避免 CPU 空转，同时保持连接新鲜。
                 monoio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
         });
-        loop {
-            let (conn, peer_addr) = listener.accept().await?;
-            debug!("🤝 收到新连接: {}", peer_addr);
 
-            // 克隆 handle 以便进入异步协程
-            let this = self.clone();
+        loop {
+            // 使用 select 同时监听新连接和关闭信号
+            let accept_fut = listener.accept();
             
-            monoio::spawn(async move {
-                if let Err(e) = this.handle_connection(conn).await {
-                    error!("❌ 连接处理异常: {}", e);
+            match select(Box::pin(accept_fut), Box::pin(&mut shutdown_rx)).await {
+                Either::Left((accept_res, _)) => {
+                    let (conn, peer_addr) = accept_res?;
+                    debug!("🤝 收到新连接: {}", peer_addr);
+
+                    // 增加连接计数
+                    self.active_connections.fetch_add(1, Ordering::SeqCst);
+                    
+                    let this = self.clone();
+                    monoio::spawn(async move {
+                        if let Err(e) = this.handle_connection(conn).await {
+                            error!("❌ 连接处理异常: {}", e);
+                        }
+                        // 连接处理结束，减少计数
+                        this.active_connections.fetch_sub(1, Ordering::SeqCst);
+                    });
                 }
-            });
+                Either::Right(_) => {
+                    info!("🛑 收到终止信号，正在平滑下线...");
+                    break;
+                }
+            }
         }
+
+        // --- 进入平滑下线等待期 ---
+        let start_wait = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+        
+        while self.active_connections.load(Ordering::SeqCst) > 0 {
+            let count = self.active_connections.load(Ordering::SeqCst);
+            info!("⏳ 正在等待 {} 个活跃连接关闭...", count);
+            
+            if start_wait.elapsed() >= timeout {
+                warn!("⏰ 平滑下线超时，强制退出。仍有 {} 个连接。", count);
+                break;
+            }
+            monoio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        info!("👋 平滑下线完成，服务正式退出。");
+        Ok(())
     }
 
     /// 处理单个连接的业务逻辑
     async fn handle_connection(
-        self,
+        &self,
         mut inbound: TcpStream, 
     ) -> anyhow::Result<()> {
         let pool = self.pool.clone();

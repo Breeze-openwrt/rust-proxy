@@ -152,8 +152,43 @@ async fn async_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     info!("🚀 Rust-Proxy 服务逻辑已就绪");
     info!("📊 当前日志级别: {}", log_level);
 
+    // --- 平滑下线：信号捕捉初始化 ---
+    let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel();
+    
+    // 我们使用 Unix 套接字对（Socket Pair）来架起信号处理与异步运行时之间的桥梁。
+    // 这比原始管道更符合 monoio 的 IO 模型。
+    use monoio::net::UnixStream;
+    let (mut socket_r, socket_w) = UnixStream::pair()?;
+    
+    // 信号处理器：收到信号后往套接字里塞一个字节
+    use std::os::unix::io::{RawFd, AsRawFd};
+    static mut SIGNAL_FD: RawFd = -1;
+    unsafe { SIGNAL_FD = socket_w.as_raw_fd(); }
+
+    extern "C" fn handle_sig(_: libc::c_int) {
+        unsafe {
+            let buf = [1u8];
+            libc::write(SIGNAL_FD, buf.as_ptr() as *const _, 1);
+        }
+    }
+
+    unsafe {
+        libc::signal(libc::SIGINT, handle_sig as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_sig as libc::sighandler_t);
+    }
+
+    // 异步任务：监视套接字读取端
+    use monoio::io::AsyncReadRent;
+    monoio::spawn(async move {
+        let buf = vec![0u8; 1];
+        let (res, _): (Result<usize, _>, _) = socket_r.read(buf).await;
+        if res.is_ok() {
+            let _ = shutdown_tx.send(());
+        }
+    });
+
     let server = ProxyServer::new(config);
-    server.run().await?;
+    server.run(shutdown_rx).await?;
 
     Ok(())
 }

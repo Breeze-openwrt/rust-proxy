@@ -1,0 +1,36 @@
+[Unit]
+Description=Rust-Proxy: High-Performance SNI Proxy with io_uring and eBPF
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 我们使用 root 运行，因为 eBPF TC 和 SockMap 需要 CAP_NET_ADMIN。
+# 如果需要非 root 运行，请确保设置了正确的 AmbientCapabilities。
+User=root
+Group=root
+
+# 核心可执行文件与配置路径
+ExecStart=/usr/local/bin/rust-proxy -c /etc/rust-proxy/config.jsonc
+# 工作目录设为配置所在目录
+WorkingDirectory=/etc/rust-proxy
+
+# 性能优化：赋予内核网络管理和原始套接字操作能力
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_ADMIN
+
+# 资源限制：对于 io_uring 这种暴力引擎，我们需要确保它有足够的锁定内存
+LimitMEMLOCK=infinity
+# 允许无限的文件打开数
+LimitNOFILE=1048576
+
+# 自愈机制：崩溃后 5 秒自动重启
+Restart=always
+RestartSec=5s
+
+# 安全加固
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

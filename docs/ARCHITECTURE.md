@@ -52,6 +52,14 @@ graph TD
 | 持久连接 | eBPF SockMap | 中继阶段零拷贝，延迟降低 80% |
 | 二进制优化 | x86-64-v3 | AVX2 指令集暴力加持 |
 
+## 5. 部署与运维架构 (Deployment & Operations)
+
+为了适应生产环境，我们实现了 **Systemd 集成自动化**。
+
+- **权限隔离**：通过 `CapabilityBoundingSet` 仅授予 `CAP_NET_ADMIN` 和 `CAP_NET_RAW`，遵循最小特权原则。
+- **配置管控**：全局配置文件统一存放于 `/etc/rust-proxy/`，实现配置与程序的解耦。
+- **生命周期管理**：利用 Systemd 的 `Restart=always` 机制，结合 eBPF 的状态脱离能力，确保即使主进程崩溃，内核态的过滤逻辑依然能保持基础防御。
+
 ---
 
 > [!TIP]

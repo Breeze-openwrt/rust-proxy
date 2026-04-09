@@ -44,9 +44,21 @@ cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none -Z build
 ```
 
 ### 生产部署 (推荐)
-直接在 [Releases](https://github.com/Breeze-openwrt/rust-proxy/releases) 页面下载针对您架构优化的二进制包：
-- `rust-proxy-linux-amd64-v3`: 开启 AVX2 指令集，速度最快。
-- `rust-proxy-linux-amd64-std`: 传统架构，兼容性最强。
+直接在 [Releases](https://github.com/Breeze-openwrt/rust-proxy/releases) 页面下载针对您架构优化的二进制包。
+
+### 自动化安装 (Systemd 集成)
+我们提供了“一键安装”脚本，支持自动编译、文件分发及 systemd 服务注册：
+```bash
+# 克隆仓库后运行
+sudo ./scripts/install.sh
+```
+该脚本会将程序安装为 `rust-proxy` 系统服务，并自动配置必要的内核权限 (CAP_NET_ADMIN)。
+
+#### 服务管理命令：
+- **查看状态**: `systemctl status rust-proxy`
+- **查看日志**: `journalctl -u rust-proxy -f`
+- **重启服务**: `systemctl restart rust-proxy`
+- **修改配置**: 编辑 `/etc/rust-proxy/config.jsonc` 后重启服务。
 
 ---
 
