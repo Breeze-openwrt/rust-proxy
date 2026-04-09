@@ -9,5 +9,3 @@ rustflags = [
     "-C", "link-arg=--btf",
 ]
 
-[unstable]
-build-std = ["core"]
