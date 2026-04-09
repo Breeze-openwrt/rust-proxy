@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# 暂时无需依赖，保持纯粹的 no_std 数据结构定义
+aya = { version = "0.13", optional = true }
+
+[features]
+user = ["dep:aya"]

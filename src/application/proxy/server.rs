@@ -17,6 +17,9 @@ use std::cell::RefCell;
 use aya::{Ebpf, programs::SkSkb};
 #[cfg(target_os = "linux")]
 use aya::maps::{SockMap, HashMap};
+#[cfg(target_os = "linux")]
+use aya::programs::{tc, SchedClassifier, TcAttachType};
+use rust_proxy_common::{DomainKey, SessionKey};
 use tracing::{info, error, debug, warn};
 use futures::future::{select, Either};
 
@@ -63,6 +66,35 @@ impl ProxyServer {
             match Ebpf::load(&bytecode_data) {
                 Ok(mut bpf) => {
                     info!("🚀 eBPF 字节码加载成功，准备挂载...");
+                    
+                    // --- 步骤 1: 挂载 TC 过滤器 (针对域名侦听和防御) ---
+                    let _ = tc::qdisc_add_clsact("eth0"); // 尝试为 eth0 添加 clsact (忽略错误，可能已存在)
+                    if let Some(prog) = bpf.program_mut("filter_sni") {
+                        if let Ok(tc_prog) = SchedClassifier::try_from(prog) {
+                            if let Ok(_) = tc_prog.load() {
+                                if let Err(e) = tc_prog.attach("eth0", TcAttachType::Ingress) {
+                                    warn!("❌ TC 挂载失败 (eth0): {:?}", e);
+                                } else {
+                                    info!("✅ TC 域名过滤器已挂载到 eth0 (Ingress)");
+                                }
+                            }
+                        }
+                    }
+
+                    // --- 步骤 2: 同步域名白名单到内核 ---
+                    if let Some(map) = bpf.map_mut("ALLOWED_DOMAINS") {
+                        if let Ok(mut domains_map) = HashMap::<_, DomainKey, u32>::try_from(map) {
+                            for domain in shared_config.routes.keys() {
+                                let mut key = DomainKey { name: [0u8; 64] };
+                                let bytes = domain.as_bytes();
+                                let len = std::cmp::min(bytes.len(), 64);
+                                key.name[..len].copy_from_slice(&bytes[..len]);
+                                let _ = domains_map.insert(key, 1, 0);
+                                info!("🛡️ 内核白名单已同步: {}", domain);
+                            }
+                        }
+                    }
+
                     // 改进后的带有详细错误日志的挂载流程
                     let mut success = false;
                     unsafe {
