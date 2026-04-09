@@ -10,6 +10,7 @@
 use std::collections::{HashMap, VecDeque}; // 引入哈希表和双端队列，用于管理不同域名的连接。
 use monoio::net::TcpStream; // 引入高性能 TCP 流。
 use std::time::{Instant, Duration}; // 用于计算连接的存活时间。
+use tracing::{debug, info}; // 引入日志宏。
 
 /// 连接包装器，包含建立时间，用于超时校验
 struct IdleConnection {
@@ -37,27 +38,55 @@ impl ConnectionPool {
 
     /// 从池中“借出”一个可用的连接
     /// 
-    /// 源码欣赏：这里体现了“快速提取”的思想。
-    /// 我们会检查队列头部的连接是否已经超时，如果超时则丢弃并寻找下一个。
+    /// 优化 1：LIFO (后进先出) - 最鲜活的连接放在队列尾部。
+    /// 优化 2：健康探测 - 确保借出的连接不是“僵尸连接”。
     pub fn get(&mut self, target: &str) -> Option<TcpStream> {
-        // 尝试获取该目标的队列
         if let Some(queue) = self.pools.get_mut(target) {
-            // 循环检查，直到找到一个没过期的连接或队列为空
-            while let Some(conn) = queue.pop_front() {
-                if conn.created_at.elapsed() < self.idle_timeout {
-                    // 找到一个“新鲜”的连接，完美！
-                    return Some(conn.stream);
+            // LIFO: 改用 pop_back 获取最新鲜的连接
+            while let Some(conn) = queue.pop_back() {
+                // 首先检查时间戳超时
+                if conn.created_at.elapsed() >= self.idle_timeout {
+                    drop(conn);
+                    continue;
                 }
-                // 连接太老了，后台会自动断开，我们直接丢弃处理下一个。
-                drop(conn); 
+
+                // 核心优化：主动探测连接是否依然健康 (Active Health Probing)
+                if !Self::is_connection_alive(&conn.stream) {
+                    debug!("🗑️ 发现失效连接: {}, 已丢弃", target);
+                    drop(conn);
+                    continue;
+                }
+
+                return Some(conn.stream);
             }
         }
-        None // 没找到可用的，只能让调用者自己去创建了。
+        None
+    }
+
+    /// 探测连接是否依然存活 (不读取数据的 Peek 探测)
+    fn is_connection_alive(stream: &TcpStream) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
+        let mut buf = [0u8; 1];
+        // 使用 MSG_PEEK | MSG_DONTWAIT 探测协议栈状态
+        // 如果返回 0，表示对端已关闭连接（EOF）
+        // 如果返回错误且错误不是 EWOULDBLOCK，表示连接已异常
+        let res = unsafe {
+            libc::recv(fd, buf.as_mut_ptr() as *mut _, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT)
+        };
+        
+        if res == 0 { return false; } // 对端已正常关闭
+        if res < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::WouldBlock {
+                return true; // 没有数据可读，但连接依然活跃
+            }
+            return false; // 发生套接字错误
+        }
+        true // 有数据等待读取（对于预热连接这很少见，但也表示连接是活的）
     }
 
     /// 将一个新建立的连接存入池中
-    /// 
-    /// 这是 JumpStart 被动填充或主动回收的入口。
     pub fn put(&mut self, target: String, stream: TcpStream) {
         let entry = self.pools.entry(target).or_insert_with(VecDeque::new);
         entry.push_back(IdleConnection {
@@ -66,25 +95,28 @@ impl ConnectionPool {
         });
     }
 
-    /// 维护函数：由后台协程调用，确保每个后端的连接数达到预设的 jump_start 值
-    /// 
-    /// 参数说明：
-    /// `target`: 后端地址（例如 "127.0.0.1:10443"）
-    /// `target_count`: 目标预热连接数
-    pub async fn fill_if_needed(&mut self, target: &str, target_count: usize) {
+    /// 获取指定目标还缺少的连接数
+    pub fn get_needed_count(&self, target: &str, target_count: usize) -> usize {
         let current_count = self.pools.get(target).map_or(0, |q| q.len());
-        
         if current_count < target_count {
-            // 这里体现了异步填充的威力：我们并行发出连接请求
-            // 为了简单起见，目前我们只填一个，由外部循环不断调用。
-            match monoio::net::TcpStream::connect(target).await {
-                Ok(stream) => {
-                    self.put(target.to_string(), stream);
-                }
-                Err(_) => {
-                    // 连接失败，可能后端挂了，暂不处理，等待下一次尝试。
-                }
-            }
+            target_count - current_count
+        } else {
+            0
         }
+    }
+
+    /// 暴力优化：并发批量填充 (Batch JumpStart)
+    /// 
+    /// 不再在持有锁的情况下进行异步连接。
+    pub async fn fill_batch(target: String, count: usize) -> Vec<TcpStream> {
+        info!("🔥 正在为 {} 并发建立 {} 个连接...", target, count);
+        
+        let mut futures = Vec::new();
+        for _ in 0..count {
+            futures.push(monoio::net::TcpStream::connect(target.clone()));
+        }
+
+        let results = futures::future::join_all(futures).await;
+        results.into_iter().filter_map(|res| res.ok()).collect()
     }
 }

@@ -169,8 +169,22 @@ impl ProxyServer {
         monoio::spawn(async move {
             loop {
                 for route in config_for_warmup.routes.values() {
-                    let mut p = pool_for_warmup.borrow_mut();
-                    p.fill_if_needed(&route.addr, route.jump_start).await;
+                    // 1. 先探测缺口（短时间借用池子，不带 Await）
+                    let needed = {
+                        let p = pool_for_warmup.borrow();
+                        p.get_needed_count(&route.addr, route.jump_start)
+                    };
+
+                    // 2. 如果有缺口，并发连接（不持有池子的锁）
+                    if needed > 0 {
+                        let connections = ConnectionPool::fill_batch(route.addr.clone(), needed).await;
+                        
+                        // 3. 把连好的塞回去（短时间借用池子，不带 Await）
+                        let mut p = pool_for_warmup.borrow_mut();
+                        for conn in connections {
+                            p.put(route.addr.clone(), conn);
+                        }
+                    }
                 }
                 monoio::time::sleep(std::time::Duration::from_secs(10)).await;
             }
