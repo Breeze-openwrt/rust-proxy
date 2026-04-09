@@ -13,8 +13,4 @@ rust-proxy-common = { path = "../rust-proxy-common" }
 name = "rust-proxy-ebpf-kernel" # 🔥 纠偏：明确重命名为内核字节码标识，避免与用户态主程序混淆
 path = "src/main.rs"
 
-[profile.release]
-# 极致性能优化设置
-lto = true
-panic = "abort" # 内核态不支持堆栈展开
-opt-level = 3   # 开启最高级别优化以压榨吞吐量
+
