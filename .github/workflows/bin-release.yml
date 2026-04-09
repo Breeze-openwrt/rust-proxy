@@ -62,12 +62,10 @@ jobs:
       - name: 🍳 Compile Linux amd64 Standard (Compatibility)
         # 兼容型版本，适用于所有 amd64 机器
         run: |
-          # 🔥 关键修正 1：针对 no-std 环境强制从源码构建核心库 (Z build-std)
-          # 同时指定正确的重命名后的二进制目标名称
-          cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none -Z build-std=core && cd ..
+          # 🔥 关键修正 1：移除 cd，直接从根目录触发内核字节码编译，确保产物路径在根目录 target
+          cargo build --package rust-proxy-ebpf --bin rust-proxy-ebpf-kernel --release --target bpfel-unknown-none -Z build-std=core
           
-          # 🔥 关键修正 2：显式指定 --bin，强制生成名为 rust-proxy 的二进制
-          # 配合 find 指令进行鲁棒性定位，解决不同环境下 target 目录层级差异
+          # 🔥 关键修正 2：针对 Native 构建移除冗余 --target，Cargo 将默认输出到 target/release
           cargo build --package rust-proxy --bin rust-proxy --release
           find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-std
 
