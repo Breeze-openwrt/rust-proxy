@@ -66,16 +66,17 @@ jobs:
           # 同时指定正确的重命名后的二进制目标名称
           cd rust-proxy-ebpf && cargo build --release --target bpfel-unknown-none -Z build-std=core && cd ..
           
-          # 🔥 关键修正 2：针对 Native 构建移除冗余 --target，Cargo 将默认输出到 target/release
-          cargo build --package rust-proxy --release
-          mv target/release/rust-proxy ./rust-proxy-linux-amd64-std
+          # 🔥 关键修正 2：显式指定 --bin，强制生成名为 rust-proxy 的二进制
+          # 配合 find 指令进行鲁棒性定位，解决不同环境下 target 目录层级差异
+          cargo build --package rust-proxy --bin rust-proxy --release
+          find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-std
 
       - name: 🍳 Compile Linux amd64 v3 (Performance Monster)
         # 🔥 暴力提速：使用标准的 x86-64-v3 分层优化
         run: |
-          # 🔥 关键修正 3：同上，移除冗余 --target 确保路径一致性
-          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --release
-          mv target/release/rust-proxy ./rust-proxy-linux-amd64-v3
+          # 🔥 关键修正 3：同上，显式锚定二进制并动态提取
+          RUSTFLAGS="-C target-cpu=x86-64-v3" cargo build --package rust-proxy --bin rust-proxy --release
+          find target -type f -name "rust-proxy" -executable | head -n 1 | xargs -I {} mv {} ./rust-proxy-linux-amd64-v3
 
       - name: 🧹 Pure Cleanup - Destroy Old Releases
         # 💣 模仿 gnet-proxy，清空历史残骸，只留独苗
