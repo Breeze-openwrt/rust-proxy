@@ -11,32 +11,38 @@
 
 use aya_ebpf::{
     macros::{sk_msg, map}, // 引入 BPF 程序宏。
-    maps::SockMap, // 引入 Socket 映射表。
+    maps::{SockMap, HashMap}, // 引入 Socket 映射表与哈希表。
     programs::SkMsgContext, // 消息上下文。
+    helpers::bpf_get_socket_cookie, // 获取 Socket 唯一标识的黑科技。
 };
 
 /// 声明一个全局的 Socket 映射表
 /// 
-/// 这个 Map 由用户态填充：当代理服务器确定了转发关系，
-/// 就会把两端的 FD 存入这里。
+/// 这个 Map 由用户态填充：存放所有的活跃 Socket。
 #[map]
 static REDIRECT_MAP: SockMap = SockMap::with_max_entries(1024, 0);
+
+/// 映射关系表：Socket Cookie -> 目标在 REDIRECT_MAP 中的索引
+#[map]
+static PEER_MAP: HashMap<u64, u32> = HashMap::with_max_entries(1024, 0);
 
 /// 核心重定向逻辑
 /// 
 /// 每当有数据包 (Message) 到达受监控的 Socket 时，内核就会调用这个函数。
 #[sk_msg]
 pub fn fast_forward(ctx: SkMsgContext) -> u32 {
-    // --- 暴力重定向：安全承诺 ---
-    // 由于 redirect_msg 是直接在内核态操纵 Socket 数据流，
-    // 在 Rust 语法中它被标记为 unsafe。
-    // 但请放心，eBPF 程序在加载时会经过内核“验证器”的魔鬼检查，确保绝对安全。
-    unsafe {
-        let _ = REDIRECT_MAP.redirect_msg(&ctx, 0, 0);
+    // 1. 获取当前 Socket 的唯一“身份证” (Cookie)
+    let cookie = unsafe { bpf_get_socket_cookie(ctx.msg as *mut _) };
+    
+    // 2. 在关系表中查找它的“另一半”在哪
+    if let Some(peer_index) = unsafe { PEER_MAP.get(&cookie) } {
+        // 3. 暴力重定向：让数据包直接“瞬移”到目标端口
+        unsafe {
+            let _ = REDIRECT_MAP.redirect_msg(&ctx, *peer_index, 0);
+        }
     }
 
-    // 源码级解释：
-    // 返回 1 代表 SK_PASS，表示该消息处理完成且被允许通过。
+    // 处理完成，允许通过
     1
 }
 

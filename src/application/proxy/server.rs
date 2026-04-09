@@ -13,30 +13,83 @@ use monoio::net::{TcpListener, TcpStream};
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt, Splitable};
 use std::rc::Rc;
 use std::cell::RefCell;
+#[cfg(target_os = "linux")]
+use aya::{Ebpf, programs::SkMsg};
+#[cfg(target_os = "linux")]
+use aya::maps::{SockMap, HashMap};
 use tracing::{info, error, debug, warn};
 use futures::future::{select, Either};
-
-// --- eBPF 增强组件 ---
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
 /// 代理服务器主体
+#[derive(Clone)]
 pub struct ProxyServer {
     /// 全局配置
     config: Rc<Config>,
     /// 共享连接池
     pool: Rc<RefCell<ConnectionPool>>,
+    #[cfg(target_os = "linux")]
+    bpf: Option<Rc<RefCell<Ebpf>>>,
+    #[cfg(target_os = "linux")]
+    next_index: Rc<RefCell<u32>>,
 }
 
 impl ProxyServer {
     /// 创建服务器实例
     pub fn new(config: Config) -> Self {
-        // 从配置中读取默认超时，若未指定则默认 5 分钟
+        let shared_config = Rc::new(config);
         let idle_timeout = 300; 
         let pool = Rc::new(RefCell::new(ConnectionPool::new(idle_timeout)));
-        Self { 
-            config: Rc::new(config), 
-            pool 
+
+        #[cfg(target_os = "linux")]
+        let mut bpf_instance = None;
+        #[cfg(target_os = "linux")]
+        {
+            // 尝试加载 eBPF 字节码
+            let bpf_path = "./target/bpfel-unknown-none/release/rust-proxy-ebpf-kernel";
+            match Ebpf::load_file(bpf_path) {
+                Ok(mut bpf) => {
+                    info!("🚀 eBPF 字节码加载成功，准备挂载...");
+                    let mut success = false;
+                    // 使用指针绕过对 bpf 的重叠借用检查 (Map 为不可变借用，Program 为可变借用)
+                    unsafe {
+                        let bpf_ptr = &mut bpf as *mut Ebpf;
+                        if let Some(map) = (*bpf_ptr).map("REDIRECT_MAP") {
+                            if let Ok(sm) = SockMap::<&aya::maps::MapData>::try_from(map) {
+                                if let Some(program) = (*bpf_ptr).program_mut("fast_forward") {
+                                    if let Ok(program) = program.try_into() {
+                                        let sk_msg: &mut SkMsg = program;
+                                        if let Ok(_) = sk_msg.load() {
+                                            if let Ok(_) = sk_msg.attach(sm.fd()) {
+                                                info!("✅ eBPF 程序已成功挂载到 REDIRECT_MAP");
+                                                success = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if success {
+                        bpf_instance = Some(Rc::new(RefCell::new(bpf)));
+                    } else {
+                        warn!("⚠️ eBPF 挂载失败，将降级到纯用户态模式");
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ eBPF 加速模块未就绪 (或非 Linux 环境): {}", e);
+                }
+            }
+        }
+
+        ProxyServer {
+            config: shared_config,
+            pool,
+            #[cfg(target_os = "linux")]
+            bpf: bpf_instance,
+            #[cfg(target_os = "linux")]
+            next_index: Rc::new(RefCell::new(0)),
         }
     }
 
@@ -67,11 +120,11 @@ impl ProxyServer {
             let (conn, peer_addr) = listener.accept().await?;
             debug!("🤝 收到新连接: {}", peer_addr);
 
-            let shared_pool = self.pool.clone();
-            let shared_config = self.config.clone();
+            // 克隆 handle 以便进入异步协程
+            let this = self.clone();
             
             monoio::spawn(async move {
-                if let Err(e) = Self::handle_connection(conn, shared_pool, shared_config).await {
+                if let Err(e) = this.handle_connection(conn).await {
                     error!("❌ 连接处理异常: {}", e);
                 }
             });
@@ -80,10 +133,11 @@ impl ProxyServer {
 
     /// 处理单个连接的业务逻辑
     async fn handle_connection(
+        self,
         mut inbound: TcpStream, 
-        pool: Rc<RefCell<ConnectionPool>>, 
-        config: Rc<Config>
     ) -> anyhow::Result<()> {
+        let pool = self.pool.clone();
+        let config = self.config.clone();
         // --- 步骤 1: 探测首包获取 SNI ---
         let buf = vec![0u8; 2048];
         let (res, buf) = inbound.read(buf).await;
@@ -130,7 +184,12 @@ impl ProxyServer {
         res?;
 
         // --- 步骤 5: 建立双向透明转发 ---
-        Self::try_offload_to_ebpf(&inbound, &outbound).await;
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(ref bpf) = self.bpf {
+                self.try_offload_to_ebpf(bpf, &inbound, &outbound).await;
+            }
+        }
 
         let (mut client_r, mut client_w) = inbound.into_split();
         let (mut server_r, mut server_w) = outbound.into_split();
@@ -151,13 +210,56 @@ impl ProxyServer {
         Ok(())
     }
 
-    /// 尝试将转发逻辑交给 eBPF 接管
-    async fn try_offload_to_ebpf(_in: &TcpStream, _out: &TcpStream) {
-        #[cfg(target_os = "linux")]
-        {
-            let fd_in = _in.as_raw_fd();
-            let fd_out = _out.as_raw_fd();
-            debug!("⚡ 尝试 eBPF 加速: FD {} -> FD {}", fd_in, fd_out);
+    /// 尝试将转发逻辑交给 eBPF 接管 (Offload Implementation)
+    #[cfg(target_os = "linux")]
+    async fn try_offload_to_ebpf(&self, bpf_rc: &Rc<RefCell<Ebpf>>, inbound: &TcpStream, outbound: &TcpStream) {
+        use std::os::unix::io::AsRawFd;
+        
+        let fd_in = inbound.as_raw_fd();
+        let fd_out = outbound.as_raw_fd();
+
+        // 1. 分配唯一的索引对（Index Pairing）
+        // 采用 index <-> index + 1 的奇偶对撞策略
+        let (idx_in, idx_out) = {
+            let mut next = self.next_index.borrow_mut();
+            let start = *next;
+            *next += 2;
+            (start, start + 1)
+        };
+
+        // 获取 Socket Cookie (内核级的唯一标识)
+        let mut cookie_in: u64 = 0;
+        let mut cookie_out: u64 = 0;
+        let mut len = std::mem::size_of::<u64>() as libc::socklen_t;
+        unsafe {
+            libc::getsockopt(fd_in, libc::SOL_SOCKET, 80 /* SO_COOKIE */, &mut cookie_in as *mut _ as *mut _, &mut len);
+            libc::getsockopt(fd_out, libc::SOL_SOCKET, 80 /* SO_COOKIE */, &mut cookie_out as *mut _ as *mut _, &mut len);
         }
+
+        if cookie_in == 0 || cookie_out == 0 { return; }
+
+        // 1. 获取并操作 REDIRECT_MAP
+        {
+            let mut bpf = bpf_rc.borrow_mut();
+            if let Some(map) = bpf.map_mut("REDIRECT_MAP") {
+                if let Ok(mut redirect_map) = SockMap::try_from(map) {
+                    let _ = redirect_map.set(idx_in, &fd_in, 0);
+                    let _ = redirect_map.set(idx_out, &fd_out, 0);
+                }
+            }
+        }
+
+        // 2. 获取并操作 PEER_MAP
+        {
+            let mut bpf = bpf_rc.borrow_mut();
+            if let Some(map) = bpf.map_mut("PEER_MAP") {
+                if let Ok(mut peer_map) = HashMap::<_, u64, u32>::try_from(map) {
+                    let _ = peer_map.insert(&cookie_in, &idx_out, 0);
+                    let _ = peer_map.insert(&cookie_out, &idx_in, 0);
+                }
+            }
+        }
+
+        info!("⚡ eBPF 暴力加速成功: FD {} <-> FD {} (Indices: {} <-> {})", fd_in, fd_out, idx_in, idx_out);
     }
 }
