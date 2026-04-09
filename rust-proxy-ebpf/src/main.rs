@@ -16,6 +16,11 @@ use aya_ebpf::{
     helpers::{bpf_get_socket_cookie, bpf_ktime_get_ns}, // 获取 Socket 唯一标识与时间。
     EbpfContext, // 引入上下文 Trait，提供 as_ptr 支持。
 };
+use network_types::{
+    eth::EthHdr,
+    ip::{Ipv4Hdr, IpProto},
+    tcp::TcpHdr,
+};
 use rust_proxy_common::{DomainKey, SessionKey};
 pub trait PtrAt {
     fn ptr_at<T>(&self, offset: usize) -> Result<*const T, ()>;
@@ -52,8 +57,9 @@ static ALLOWED_DOMAINS: HashMap<DomainKey, u32> = HashMap::with_max_entries(1024
 
 /// 会话缓存 (Session Cache)
 /// Key: 5-tuple, Value: 最后活跃时间 (ns)
+/// 优化：扩容到 32768，减少高并发下的哈希冲突和解析损耗
 #[map]
-static SESSION_CACHE: HashMap<SessionKey, u64> = HashMap::with_max_entries(8192, 0);
+static SESSION_CACHE: HashMap<SessionKey, u64> = HashMap::with_max_entries(32768, 0);
 
 /// 许可证 (License) - eBPF 的法典
 /// 
@@ -97,16 +103,17 @@ pub fn filter_sni(ctx: TcContext) -> i32 {
 #[inline(always)]
 fn try_filter_sni(ctx: TcContext) -> Result<i32, ()> {
     let eth_hdr = ctx.ptr_at::<EthHdr>(0)?;
-    if unsafe { (*eth_hdr).ether_type } != 0x0008 { // IPv4
+    if unsafe { (*eth_hdr).ether_type } != network_types::eth::EtherType::Ipv4 { 
         return Ok(0); // TC_ACT_OK
     }
 
-    let ip_hdr = ctx.ptr_at::<IpHdr>(EthHdr::LEN)?;
-    if unsafe { (*ip_hdr).protocol } != 0x06 { // TCP
+    let eth_len = core::mem::size_of::<EthHdr>();
+    let ip_hdr = ctx.ptr_at::<Ipv4Hdr>(eth_len)?;
+    if unsafe { (*ip_hdr).proto } != IpProto::Tcp { 
         return Ok(0);
     }
 
-    let ip_len = EthHdr::LEN + IpHdr::LEN;
+    let ip_len = eth_len + core::mem::size_of::<Ipv4Hdr>();
     let tcp_hdr = ctx.ptr_at::<TcpHdr>(ip_len)?;
 
     // 1. 构建会话 Key
@@ -114,20 +121,36 @@ fn try_filter_sni(ctx: TcContext) -> Result<i32, ()> {
         SessionKey {
             src_ip: (*ip_hdr).src_addr,
             dst_ip: (*ip_hdr).dst_addr,
-            src_port: (*tcp_hdr).src_port,
-            dst_port: (*tcp_hdr).dst_port,
+            src_port: (*tcp_hdr).source,
+            dst_port: (*tcp_hdr).dest,
             proto: 0x06,
         }
     };
 
-    // 2. 检查会话缓存
+    // 2. 检查会话缓存：已建立的连接直接放行，无需重复解析
     if unsafe { SESSION_CACHE.get(&session).is_some() } {
         return Ok(0); // TC_ACT_OK
     }
 
+    // 🏆 暴力优化：快速路径 (Fast Path)
+    // 提示：绝大多数 4K 视频数据包都是纯 ACK，在缓存命中后由于上方逻辑放行。
+    // 但对于未命中的包（如握手中期包），如果没有 PSH 标记且不是 SYN，几乎不可能包含 SNI，直接跳过解析。
+    let tcp_val = unsafe { &*tcp_hdr };
+    
+    // 手动位运算提取 Flags
+    let flags = unsafe { 
+        *(((tcp_hdr as *const _ as *const u8).add(13)))
+    };
+    let is_syn = flags & 0x02;
+    let is_psh = flags & 0x08;
+
+    if is_syn == 0 && is_psh == 0 {
+        return Ok(0);
+    }
+
     // 3. 解析 TLS Client Hello (探测 SNI)
     // 数据偏移量 = Ethernet + IP + TCP Data Offset
-    let data_offset = ip_len + (unsafe { (*tcp_hdr).doff() as usize } * 4);
+    let data_offset = ip_len + (tcp_val.doff() as usize * 4);
     
     // 我们只在大约前 512 字节中寻找 SNI，以防被绕过
     if let Some(sni) = parse_sni(&ctx, data_offset) {
@@ -215,46 +238,6 @@ fn parse_sni(ctx: &TcContext, offset: usize) -> Option<DomainKey> {
     }
 
     None 
-}
-
-// 基础网络结构体定义 (内核态精简版)
-#[repr(C)]
-struct EthHdr {
-    pub dst_mac: [u8; 6],
-    pub src_mac: [u8; 6],
-    pub ether_type: u16,
-}
-impl EthHdr { const LEN: usize = 14; }
-
-#[repr(C)]
-struct IpHdr {
-    pub _v_hl: u8,
-    pub tos: u8,
-    pub tot_len: u16,
-    pub id: u16,
-    pub frag_off: u16,
-    pub ttl: u8,
-    pub protocol: u8,
-    pub check: u16,
-    pub src_addr: u32,
-    pub dst_addr: u32,
-}
-impl IpHdr { const LEN: usize = 20; }
-
-#[repr(C)]
-struct TcpHdr {
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub seq: u32,
-    pub ack_seq: u32,
-    pub _bits: u16,
-    pub window: u16,
-    pub check: u16,
-    pub urg_ptr: u16,
-}
-impl TcpHdr {
-    #[inline(always)]
-    pub fn doff(&self) -> u8 { (self._bits.to_be() >> 12) as u8 }
 }
 
 #[cfg(not(test))] // 核心修正：避免与 std 冲突

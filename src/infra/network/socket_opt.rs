@@ -10,7 +10,8 @@
 
 use socket2::{Socket, Domain, Type, Protocol}; // 引入流行的底层控制原语。
 use std::net::SocketAddr; // 标准地址库。
-use anyhow; // 🔥 引入高级错误处理框架，让“暴力提速”过程中的每一个环节都处于监控下。
+use monoio::net::TcpStream; // 引入 monoio TCP 流用于调优。
+use anyhow; // 🔥 引入高级错误处理框架。
 use libc;   // 🔥 引入底层 C 库绑定，它是我们通过 setsockopt 操纵内核协议栈的魔法钥匙。
 
 /// Socket 调优工具
@@ -55,32 +56,40 @@ impl SocketOptimizer {
         Ok(socket.into())
     }
 
-    /// 对已建立的连接进行调优
-    pub fn tune_stream(stream: &std::net::TcpStream) -> anyhow::Result<()> {
-        let socket = Socket::from(stream.try_clone()?); // 暂时包装
+    /// 对已建立的连接进行极致性能调优
+    pub fn tune_stream(stream: &TcpStream) -> anyhow::Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let fd = stream.as_raw_fd();
         
-        // 禁用 Nagle 算法：
-        // 对于代理服务器，首包的速度就是生命，绝不能让内核由于等待合并而产生延迟。
+        // 我们利用 socket2 暂时从 RawFd 包装一个 Socket 来进行操作
+        use std::os::unix::io::FromRawFd;
+        let socket = unsafe { Socket::from_raw_fd(fd) };
+
+        // 1. 禁用 Nagle 算法 (解决网页加载“块状”感的核心)
         socket.set_nodelay(true)?;
 
-        // 源码级调优：TCP_QUICKACK
-        // 通过设置快速确认，让对端尽早感知到数据已接收，从而加快滑动窗口滑动。
+        // 2. 扩容缓冲区至 4MiB (视频流畅度的保障)
+        let buf_size = 4 * 1024 * 1024;
+        let _ = socket.set_recv_buffer_size(buf_size);
+        let _ = socket.set_send_buffer_size(buf_size);
+
+        // 3. 开启 TCP 快速确认 (Linux 特有的暴力提速)
         #[cfg(target_os = "linux")]
         {
-            // 使用底层系统调用设置 TCP 快速确认
-            use std::os::unix::io::AsRawFd;
-            let fd = stream.as_raw_fd();
+            let opt: i32 = 1;
             unsafe {
-                let opt: i32 = 1;
-                libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &opt as *const i32 as *const libc::c_void, std::mem::size_of::<i32>() as libc::socklen_t);
+                libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &opt as *const _ as *const _, std::mem::size_of::<i32>() as _);
             }
         }
 
-        // 开启 TCP Keepalive，防止连接由于链路空闲被静默断开
+        // 4. 激进的 Keepalive 策略 (防止连接静默断开)
         let ka = socket2::TcpKeepalive::new()
-            .with_time(std::time::Duration::from_secs(60));
+            .with_time(std::time::Duration::from_secs(30))
+            .with_interval(std::time::Duration::from_secs(5));
         socket.set_tcp_keepalive(&ka)?;
 
+        // ⚠️ 极其重要：必须调用 forget，否则 socket2 包装器在 Drop 时会关闭 FD！
+        std::mem::forget(socket);
         Ok(())
     }
 }

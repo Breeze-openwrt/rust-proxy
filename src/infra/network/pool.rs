@@ -117,6 +117,14 @@ impl ConnectionPool {
         }
 
         let results = futures::future::join_all(futures).await;
-        results.into_iter().filter_map(|res| res.ok()).collect()
+        let mut streams = Vec::new();
+        for res in results {
+            if let Ok(stream) = res {
+                // 暴力优化：预热连接在入池前必须完成极致性能调优
+                let _ = crate::infra::network::socket_opt::SocketOptimizer::tune_stream(&stream);
+                streams.push(stream);
+            }
+        }
+        streams
     }
 }

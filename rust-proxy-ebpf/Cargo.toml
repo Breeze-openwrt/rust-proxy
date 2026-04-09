@@ -8,9 +8,9 @@ edition = "2024"
 aya-ebpf = "0.1.1"
 # 引用共享模块，确保内核态使用一致的数据结构
 rust-proxy-common = { path = "../rust-proxy-common" }
+# 网络类型定义
+network-types = "0.0.5"
 
 [[bin]]
 name = "rust_proxy_ebpf_kernel" # 🔥 归一化：统一使用下划线风格，解决跨系统命名歧义
 path = "src/main.rs"
-
-

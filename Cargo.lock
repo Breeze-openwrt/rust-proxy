@@ -643,6 +643,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "network-types"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f07952b48f02537f3088f517a3cf87372a25372d51991328938531b83a31cb3a"
+
+[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -924,6 +930,7 @@ name = "rust-proxy-ebpf"
 version = "0.1.0"
 dependencies = [
  "aya-ebpf",
+ "network-types",
  "rust-proxy-common",
 ]
 
