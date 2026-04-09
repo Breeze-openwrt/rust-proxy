@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize}; // 引入序列化和反序列化宏。
 use std::collections::HashMap; // 存储路由表的哈希映射。
 use std::fs; // 文件操作。
+use anyhow; // 🔥 引入 anyhow 错误处理，确保配置加载链路的每一个 IO 错误都能被清晰记录。
 
 /// 全局配置结构体
 #[derive(Debug, Serialize, Deserialize)]

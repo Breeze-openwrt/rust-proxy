@@ -10,6 +10,8 @@
 
 use socket2::{Socket, Domain, Type, Protocol}; // 引入流行的底层控制原语。
 use std::net::SocketAddr; // 标准地址库。
+use anyhow; // 🔥 引入高级错误处理框架，让“暴力提速”过程中的每一个环节都处于监控下。
+use libc;   // 🔥 引入底层 C 库绑定，它是我们通过 setsockopt 操纵内核协议栈的魔法钥匙。
 
 /// Socket 调优工具
 pub struct SocketOptimizer;
